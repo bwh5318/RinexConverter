@@ -1,0 +1,4 @@
+# Store and check out every file byte for byte. This machine's git sets core.autocrlf=true,
+# which would turn the LF fixtures under tests/ into CRLF on checkout and break the byte-exact
+# tests (CLAUDE.md rule 7: bytes, not text).
+* -text

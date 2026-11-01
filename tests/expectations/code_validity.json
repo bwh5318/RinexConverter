@@ -1,0 +1,1737 @@
+{
+ "_doc": "Independent transcription of valid RINEX observation codes per version and satellite system, made only from specs/text/*.txt (never from rinexcore/ or docs/SPEC_TABLES.md). versions[v].codes[sys][type] lists the code remainder after the type letter: RINEX 2 -> band ('1' => C1), RINEX 3/4 -> band+attribute ('1C' => C1C). pseudo holds pseudo-observables (I, X) with full 3-character codes including the blank attribute. blank_attribute says whether a blank tracking-mode attribute ('L2 ') is allowed for ordinary observables. pdf_page is the '===== page N =====' marker in the text file; printed_page is the page number printed in the document. Loader: tests/independent/codes.py.",
+ "transcribed": "2026-10-30",
+ "versions": {
+  "2.10": {
+   "code_length": 2,
+   "systems": ["G", "R", "S", "T"],
+   "blank_system_is": "G",
+   "defined_types": ["L1", "L2", "C1", "P1", "P2", "D1", "D2", "T1", "T2", "S1", "S2"],
+   "codes": {
+    "G": {
+     "C": ["1"],
+     "P": ["1", "2"],
+     "L": ["1", "2"],
+     "D": ["1", "2"],
+     "S": ["1", "2"]
+    },
+    "R": {
+     "C": ["1"],
+     "P": ["1", "2"],
+     "L": ["1", "2"],
+     "D": ["1", "2"],
+     "S": ["1", "2"]
+    },
+    "S": {
+     "C": ["1"],
+     "L": ["1"],
+     "D": ["1"],
+     "S": ["1"]
+    },
+    "T": {
+     "T": ["1", "2"]
+    }
+   },
+   "basis": {
+    "_all": "Observed: Table A1 '# / TYPES OF OBSERV' defines one global list L1 L2 C1 P1 P2 D1 D2 T1 T2 S1 S2 with no per-system table. The per-system split below is INFERENCE.",
+    "G": "Inferred: all non-Transit types (T1/T2 are defined as Transit Integrated Doppler).",
+    "R": "Inferred: same as GPS (Table A1 wording is generic: C/A on L1, P on L1/L2); 2.10 defines no C2.",
+    "S": "Inferred from 9.1: GEO payloads are single-frequency (second-frequency fields stay blank/zero); SBAS has no P code. 2.11's table confirms C1/L1/D1/S1 for SBAS L1.",
+    "T": "Inferred: T1/T2 'Transit Integrated Doppler on 150 (T1) and 400 MHz (T2)'; no other type names a Transit frequency."
+   },
+   "cite": {
+    "_types": {
+     "file": "specs/text/rinex210.txt",
+     "line": 887,
+     "table": "Table A1 (# / TYPES OF OBSERV)"
+    },
+    "_systems": {
+     "file": "specs/text/rinex210.txt",
+     "line": 442,
+     "section": "5.1"
+    },
+    "G": {
+     "file": "specs/text/rinex210.txt",
+     "line": 887,
+     "table": "Table A1"
+    },
+    "R": {
+     "file": "specs/text/rinex210.txt",
+     "line": 887,
+     "table": "Table A1"
+    },
+    "S": {
+     "file": "specs/text/rinex210.txt",
+     "line": 750,
+     "section": "9.1"
+    },
+    "T": {
+     "file": "specs/text/rinex210.txt",
+     "line": 893,
+     "table": "Table A1"
+    }
+   },
+   "blank_attribute": {
+    "allowed": null,
+    "rule": "Not applicable: RINEX 2 codes have no attribute."
+   },
+   "pseudo": {},
+   "notes": ["No page markers in the 2.10/2.11 text extractions; citations give line numbers.", "RINEX VERSION / TYPE allows blank or G for GPS, R, S, T (NNSS Transit), M (mixed) [rinex210.txt line 824].", "Only one global obs-type list is defined (Table A1); which types apply to which system is not stated, so the per-system split is inferred [rinex210.txt line 887]."]
+  },
+  "2.11": {
+   "code_length": 2,
+   "systems": ["G", "R", "E", "S"],
+   "blank_system_is": "G",
+   "defined_types": ["C1", "C2", "C5", "C6", "C7", "C8", "D1", "D2", "D5", "D6", "D7", "D8", "L1", "L2", "L5", "L6", "L7", "L8", "P1", "P2", "S1", "S2", "S5", "S6", "S7", "S8"],
+   "codes": {
+    "G": {
+     "C": ["1", "2", "5"],
+     "P": ["1", "2"],
+     "L": ["1", "2", "5"],
+     "D": ["1", "2", "5"],
+     "S": ["1", "2", "5"]
+    },
+    "R": {
+     "C": ["1", "2"],
+     "P": ["1", "2"],
+     "L": ["1", "2"],
+     "D": ["1", "2"],
+     "S": ["1", "2"]
+    },
+    "E": {
+     "C": ["1", "5", "7", "8", "6"],
+     "L": ["1", "5", "7", "8", "6"],
+     "D": ["1", "5", "7", "8", "6"],
+     "S": ["1", "5", "7", "8", "6"]
+    },
+    "S": {
+     "C": ["1", "5"],
+     "L": ["1", "5"],
+     "D": ["1", "5"],
+     "S": ["1", "5"]
+    }
+   },
+   "basis": {
+    "_all": "Observed: section 10.1.1 table (System / Freq.Band / RINEX 2-character code) gives the per-system codes directly; Table A1 agrees (C: GPS C/A+L2C, GLONASS C/A, Galileo all; P: GPS and GLONASS only; frequency codes 1/2/5/6/7/8 per system). Transit T1/T2 removed in 2.11."
+   },
+   "cite": {
+    "_types": {
+     "file": "specs/text/rinex211.txt",
+     "line": 1145,
+     "table": "Table A1 (# / TYPES OF OBSERV)"
+    },
+    "_systems": {
+     "file": "specs/text/rinex211.txt",
+     "line": 566,
+     "section": "5.1"
+    },
+    "_transit_removed": {
+     "file": "specs/text/rinex211.txt",
+     "line": 989,
+     "section": "10.1.1"
+    },
+    "G": {
+     "file": "specs/text/rinex211.txt",
+     "line": 965,
+     "section": "10.1.1 (unnumbered table)"
+    },
+    "R": {
+     "file": "specs/text/rinex211.txt",
+     "line": 969,
+     "section": "10.1.1 (unnumbered table)"
+    },
+    "E": {
+     "file": "specs/text/rinex211.txt",
+     "line": 972,
+     "section": "10.1.1 (unnumbered table)"
+    },
+    "S": {
+     "file": "specs/text/rinex211.txt",
+     "line": 978,
+     "section": "10.1.1 (unnumbered table)"
+    }
+   },
+   "blank_attribute": {
+    "allowed": null,
+    "rule": "Not applicable: RINEX 2 codes have no attribute."
+   },
+   "pseudo": {},
+   "notes": ["Table A1 'C: Pseudorange GPS: C/A, L2C' does not name L5 [rinex211.txt line 1148], but the 10.1.1 table and the frequency-code list give GPS C5/L5/D5/S5 [rinex211.txt line 967]; included.", "SBAS band 5 (C5/L5/D5/S5) appears in 10.1.1 [rinex211.txt line 978], while 9.1 (kept from 2.10) still describes GEO payloads as single-frequency [rinex211.txt line 878].", "Galileo 'E2-L1-E1' is band 1; there is no Galileo band 2.", "Transit observation types T1/T2 removed in 2.11 [rinex211.txt line 989]."]
+  },
+  "3.00": {
+   "code_length": 3,
+   "systems": ["G", "R", "E", "S"],
+   "systems_cite": {
+    "file": "specs/text/rinex300.txt",
+    "line": 466,
+    "pdf_page": 8,
+    "note": "G R S E"
+   },
+   "codes": {
+    "G": {
+     "C": ["1C", "1P", "1W", "1Y", "1M", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "5I", "5Q", "5X"],
+     "L": ["1C", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "D": ["1C", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "S": ["1C", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"]
+    },
+    "R": {
+     "C": ["1C", "1P", "2C", "2P"],
+     "L": ["1C", "1P", "2C", "2P"],
+     "D": ["1C", "1P", "2C", "2P"],
+     "S": ["1C", "1P", "2C", "2P"]
+    },
+    "E": {
+     "C": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "L": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "D": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "S": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"]
+    },
+    "S": {
+     "C": ["1C", "5I", "5Q", "5X"],
+     "L": ["1C", "5I", "5Q", "5X"],
+     "D": ["1C", "5I", "5Q", "5X"],
+     "S": ["1C", "5I", "5Q", "5X"]
+    }
+   },
+   "bands": {
+    "G": ["1", "2", "5"],
+    "R": ["1", "2"],
+    "E": ["1", "5", "7", "8", "6"],
+    "S": ["1", "5"]
+   },
+   "cite": {
+    "G": {
+     "file": "specs/text/rinex300.txt",
+     "table": "Table 5 (RINEX Version 3 observation codes)",
+     "pdf_page": [10],
+     "printed_page": [7],
+     "line": 676,
+     "table_starts_line": 587
+    },
+    "R": {
+     "file": "specs/text/rinex300.txt",
+     "table": "Table 5 (RINEX Version 3 observation codes)",
+     "pdf_page": [10, 11],
+     "printed_page": [7, 8],
+     "line": 676,
+     "table_starts_line": 587
+    },
+    "E": {
+     "file": "specs/text/rinex300.txt",
+     "table": "Table 5 (RINEX Version 3 observation codes)",
+     "pdf_page": [11],
+     "printed_page": [8],
+     "line": 676,
+     "table_starts_line": 587
+    },
+    "S": {
+     "file": "specs/text/rinex300.txt",
+     "table": "Table 5 (RINEX Version 3 observation codes)",
+     "pdf_page": [11],
+     "printed_page": [8],
+     "line": 676,
+     "table_starts_line": 587
+    }
+   },
+   "blank_attribute": {
+    "allowed": true,
+    "rule": "Unknown tracking mode or channel: attribute may be left blank; but blank and non-blank attributes must not be mixed within the same type+band+system (L2S with L2 not allowed; L2S with C2 OK).",
+    "cite": [
+     {
+      "file": "specs/text/rinex300.txt",
+      "line": 690,
+      "pdf_page": 11,
+      "section": "5.1",
+      "printed_page": 8
+     },
+     {
+      "file": "specs/text/rinex300.txt",
+      "line": 1805,
+      "pdf_page": 28,
+      "table": "Table A1",
+      "printed_page": "A3"
+     }
+    ]
+   },
+   "pseudo": {
+    "I": {
+     "meaning": "Ionosphere phase delay (full cycles)",
+     "form": "I<band><blank attribute>; spec gives band '1, 2, ..., 8'",
+     "codes": {
+      "G": ["I1 ", "I2 ", "I5 "],
+      "R": ["I1 ", "I2 "],
+      "E": ["I1 ", "I5 ", "I7 ", "I8 ", "I6 "],
+      "S": ["I1 ", "I5 "]
+     },
+     "basis": "Observed: type I, band 1..8, attribute blank. Inferred: the band list per system is the system's own bands from the code tables (the spec gives only the generic range).",
+     "cite": [
+      {
+       "file": "specs/text/rinex300.txt",
+       "line": 909,
+       "pdf_page": 15,
+       "section": "5.12"
+      }
+     ]
+    },
+    "X": {
+     "meaning": "Receiver channel number(s)",
+     "form": "X<band><blank attribute>",
+     "codes": {
+      "G": ["X0 "],
+      "R": ["X0 "],
+      "E": ["X0 "],
+      "S": ["X0 "]
+     },
+     "basis": "Observed: section 5.13 and Table A1 both give band 0, attribute blank.",
+     "cite": [
+      {
+       "file": "specs/text/rinex300.txt",
+       "line": 930,
+       "pdf_page": 15,
+       "section": "5.13"
+      },
+      {
+       "file": "specs/text/rinex300.txt",
+       "line": 1785,
+       "pdf_page": 28,
+       "table": "Table A1"
+      }
+     ]
+    }
+   },
+   "notes": ["Table A1 attribute list omits D (semi-codeless) although Table 5 defines C2D/L2D/D2D/S2D for GPS [rinex300.txt line 1805, pdf p28].", "Codeless (attribute N) rows have no pseudorange: L1N/D1N/S1N and L2N/D2N/S2N only."]
+  },
+  "3.01": {
+   "code_length": 3,
+   "systems": ["G", "R", "E", "S", "C"],
+   "systems_cite": {
+    "file": "specs/text/rinex301.txt",
+    "line": 457,
+    "pdf_page": 8,
+    "note": "G R S E C"
+   },
+   "codes": {
+    "G": {
+     "C": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "5I", "5Q", "5X"],
+     "L": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "D": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "S": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"]
+    },
+    "R": {
+     "C": ["1C", "1P", "2C", "2P"],
+     "L": ["1C", "1P", "2C", "2P"],
+     "D": ["1C", "1P", "2C", "2P"],
+     "S": ["1C", "1P", "2C", "2P"]
+    },
+    "E": {
+     "C": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "L": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "D": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "S": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"]
+    },
+    "S": {
+     "C": ["1C", "5I", "5Q", "5X"],
+     "L": ["1C", "5I", "5Q", "5X"],
+     "D": ["1C", "5I", "5Q", "5X"],
+     "S": ["1C", "5I", "5Q", "5X"]
+    },
+    "C": {
+     "C": ["2I", "2Q", "2X", "7I", "7Q", "7X", "6I", "6Q", "6X"],
+     "L": ["2I", "2Q", "2X", "7I", "7Q", "7X", "6I", "6Q", "6X"],
+     "D": ["2I", "2Q", "2X", "7I", "7Q", "7X", "6I", "6Q", "6X"],
+     "S": ["2I", "2Q", "2X", "7I", "7Q", "7X", "6I", "6Q", "6X"]
+    }
+   },
+   "bands": {
+    "G": ["1", "2", "5"],
+    "R": ["1", "2"],
+    "E": ["1", "5", "7", "8", "6"],
+    "S": ["1", "5"],
+    "C": ["2", "7", "6"]
+   },
+   "cite": {
+    "G": {
+     "file": "specs/text/rinex301.txt",
+     "table": "Table 5 (RINEX Version 3.01 observation codes)",
+     "pdf_page": [10, 11],
+     "printed_page": [7, 8],
+     "line": 679,
+     "table_starts_line": 577
+    },
+    "R": {
+     "file": "specs/text/rinex301.txt",
+     "table": "Table 5 (RINEX Version 3.01 observation codes)",
+     "pdf_page": [11],
+     "printed_page": [8],
+     "line": 679,
+     "table_starts_line": 577
+    },
+    "E": {
+     "file": "specs/text/rinex301.txt",
+     "table": "Table 5 (RINEX Version 3.01 observation codes)",
+     "pdf_page": [11],
+     "printed_page": [8],
+     "line": 679,
+     "table_starts_line": 577
+    },
+    "S": {
+     "file": "specs/text/rinex301.txt",
+     "table": "Table 5 (RINEX Version 3.01 observation codes)",
+     "pdf_page": [11],
+     "printed_page": [8],
+     "line": 679,
+     "table_starts_line": 577
+    },
+    "C": {
+     "file": "specs/text/rinex301.txt",
+     "table": "Table 5 (RINEX Version 3.01 observation codes)",
+     "pdf_page": [11],
+     "printed_page": [8],
+     "line": 679,
+     "table_starts_line": 577
+    }
+   },
+   "blank_attribute": {
+    "allowed": true,
+    "rule": "Same as 3.00 (no mixing of blank and non-blank within type+band+system).",
+    "cite": [
+     {
+      "file": "specs/text/rinex301.txt",
+      "line": 706,
+      "pdf_page": 12,
+      "section": "5.1",
+      "printed_page": 9
+     },
+     {
+      "file": "specs/text/rinex301.txt",
+      "line": 2003,
+      "pdf_page": 31,
+      "table": "Table A1",
+      "printed_page": "A3"
+     }
+    ]
+   },
+   "pseudo": {
+    "I": {
+     "meaning": "Ionosphere phase delay (full cycles)",
+     "form": "I<band><blank attribute>; spec gives band '1, 2, ..., 8'",
+     "codes": {
+      "G": ["I1 ", "I2 ", "I5 "],
+      "R": ["I1 ", "I2 "],
+      "E": ["I1 ", "I5 ", "I7 ", "I8 ", "I6 "],
+      "S": ["I1 ", "I5 "],
+      "C": ["I2 ", "I7 ", "I6 "]
+     },
+     "basis": "Observed: type I, band 1..8, attribute blank. Inferred: the band list per system is the system's own bands from the code tables (the spec gives only the generic range).",
+     "cite": [
+      {
+       "file": "specs/text/rinex301.txt",
+       "line": 910,
+       "pdf_page": 15,
+       "section": "5.12"
+      }
+     ]
+    },
+    "X": {
+     "meaning": "Receiver channel number(s)",
+     "form": "X<band><blank attribute>",
+     "codes": {
+      "G": ["X0 "],
+      "R": ["X0 "],
+      "E": ["X0 "],
+      "S": ["X0 "],
+      "C": ["X0 "]
+     },
+     "basis": "Observed: section 5.13 and Table A1 both give band 0, attribute blank.",
+     "cite": [
+      {
+       "file": "specs/text/rinex301.txt",
+       "line": 931,
+       "pdf_page": 15,
+       "section": "5.13"
+      },
+      {
+       "file": "specs/text/rinex301.txt",
+       "line": 1983,
+       "pdf_page": 31,
+       "table": "Table A1"
+      }
+     ]
+    }
+   },
+   "notes": ["Table 5 labels the GPS L1C rows 'L1C (M)', 'L1C (L)', 'L1C (M+L)' -> attributes S, L, X (3.02 relabels them D, P, D+P with the same codes) [rinex301.txt line 603, pdf p10].", "Compass row 'E1 1589.74' has '?' in every code column: no codes defined for it (not transcribed) [rinex301.txt line 668, pdf p11].", "Compass B1 ('E2 1561.098') uses band 2: C2I/C2Q/C2X [rinex301.txt line 670, pdf p11].", "Table A1 still says 'defined in RINEX Version 3.00' and lists system codes G/R/E/S only (no C), and has no band entry for Compass bands; Table 5 is used [rinex301.txt line 1957, pdf p30]."]
+  },
+  "3.02": {
+   "code_length": 3,
+   "systems": ["G", "R", "E", "S", "J", "C"],
+   "systems_cite": {
+    "file": "specs/text/rinex302.txt",
+    "line": 2743,
+    "pdf_page": 53,
+    "table": "Table A2"
+   },
+   "codes": {
+    "G": {
+     "C": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "5I", "5Q", "5X"],
+     "L": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "D": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "S": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"]
+    },
+    "R": {
+     "C": ["1C", "1P", "2C", "2P", "3I", "3Q", "3X"],
+     "L": ["1C", "1P", "2C", "2P", "3I", "3Q", "3X"],
+     "D": ["1C", "1P", "2C", "2P", "3I", "3Q", "3X"],
+     "S": ["1C", "1P", "2C", "2P", "3I", "3Q", "3X"]
+    },
+    "E": {
+     "C": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "L": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "D": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "S": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"]
+    },
+    "S": {
+     "C": ["1C", "5I", "5Q", "5X"],
+     "L": ["1C", "5I", "5Q", "5X"],
+     "D": ["1C", "5I", "5Q", "5X"],
+     "S": ["1C", "5I", "5Q", "5X"]
+    },
+    "J": {
+     "C": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "6S", "6L", "6X"],
+     "L": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "6S", "6L", "6X"],
+     "D": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "6S", "6L", "6X"],
+     "S": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "6S", "6L", "6X"]
+    },
+    "C": {
+     "C": ["1I", "1Q", "1X", "7I", "7Q", "7X", "6I", "6Q", "6X"],
+     "L": ["1I", "1Q", "1X", "7I", "7Q", "7X", "6I", "6Q", "6X"],
+     "D": ["1I", "1Q", "1X", "7I", "7Q", "7X", "6I", "6Q", "6X"],
+     "S": ["1I", "1Q", "1X", "7I", "7Q", "7X", "6I", "6Q", "6X"]
+    }
+   },
+   "bands": {
+    "G": ["1", "2", "5"],
+    "R": ["1", "2", "3"],
+    "E": ["1", "5", "7", "8", "6"],
+    "S": ["1", "5"],
+    "J": ["1", "2", "5", "6"],
+    "C": ["1", "7", "6"]
+   },
+   "cite": {
+    "G": {
+     "file": "specs/text/rinex302.txt",
+     "table": "Table 2",
+     "pdf_page": 17,
+     "printed_page": 12,
+     "line": 814
+    },
+    "R": {
+     "file": "specs/text/rinex302.txt",
+     "table": "Table 3",
+     "pdf_page": 18,
+     "printed_page": 13,
+     "line": 854
+    },
+    "E": {
+     "file": "specs/text/rinex302.txt",
+     "table": "Table 4",
+     "pdf_page": 18,
+     "printed_page": 13,
+     "line": 880
+    },
+    "S": {
+     "file": "specs/text/rinex302.txt",
+     "table": "Table 5",
+     "pdf_page": 19,
+     "printed_page": 14,
+     "line": 902
+    },
+    "J": {
+     "file": "specs/text/rinex302.txt",
+     "table": "Table 6",
+     "pdf_page": 19,
+     "printed_page": 14,
+     "line": 923
+    },
+    "C": {
+     "file": "specs/text/rinex302.txt",
+     "table": "Table 7",
+     "pdf_page": 20,
+     "printed_page": 15,
+     "line": 962
+    }
+   },
+   "blank_attribute": {
+    "allowed": false,
+    "rule": "Not allowed (attribute must be one listed in Tables 2-7).",
+    "conflict": "Self-contradictory: the 3.02 revision history says the unknown-tracking-mode option was removed from section 5.1 (and 5.1 has no such paragraph), but Table A2 SYS / # / OBS TYPES still says 'blank : for types I and X (all) or unknown tracking mode' and 'The attribute can be left blank if not known'. 3.03 (5.1 and Table A2) and 3.05 (5.2.17) state blank is not supported from 3.02 on; 'false' follows those.",
+    "cite": [
+     {
+      "file": "specs/text/rinex302.txt",
+      "line": 278,
+      "pdf_page": 7,
+      "section": "revision history",
+      "printed_page": 2
+     },
+     {
+      "file": "specs/text/rinex302.txt",
+      "line": 2817,
+      "pdf_page": 54,
+      "table": "Table A2",
+      "printed_page": "A8"
+     },
+     {
+      "file": "specs/text/rinex302.txt",
+      "line": 2836,
+      "pdf_page": 54,
+      "table": "Table A2",
+      "printed_page": "A8"
+     },
+     {
+      "file": "specs/text/rinex303.txt",
+      "line": 974,
+      "pdf_page": 20,
+      "section": "3.03 5.1",
+      "printed_page": 15
+     }
+    ]
+   },
+   "pseudo": {
+    "I": {
+     "meaning": "Ionosphere phase delay (full cycles)",
+     "form": "I<band><blank attribute>; spec gives band '1, 2, ..., 8'",
+     "codes": {
+      "G": ["I1 ", "I2 ", "I5 "],
+      "R": ["I1 ", "I2 ", "I3 "],
+      "E": ["I1 ", "I5 ", "I7 ", "I8 ", "I6 "],
+      "S": ["I1 ", "I5 "],
+      "J": ["I1 ", "I2 ", "I5 ", "I6 "],
+      "C": ["I1 ", "I7 ", "I6 "]
+     },
+     "basis": "Observed: type I, band 1..8, attribute blank. Inferred: the band list per system is the system's own bands from the code tables (the spec gives only the generic range).",
+     "cite": [
+      {
+       "file": "specs/text/rinex302.txt",
+       "line": 1234,
+       "pdf_page": 25,
+       "section": "5.12"
+      }
+     ]
+    },
+    "X": {
+     "meaning": "Receiver channel number(s)",
+     "form": "X<band><blank attribute>",
+     "codes": {
+      "G": ["X1 ", "X0 "],
+      "R": ["X1 ", "X0 "],
+      "E": ["X1 ", "X0 "],
+      "S": ["X1 ", "X0 "],
+      "J": ["X1 ", "X0 "],
+      "C": ["X1 ", "X0 "]
+     },
+     "basis": "Observed conflict: section 5.13 gives band 1; Table A2 band list gives '0 for type X (all)'. Both are listed so neither transcription is silently dropped.",
+     "cite": [
+      {
+       "file": "specs/text/rinex302.txt",
+       "line": 1261,
+       "pdf_page": 25,
+       "section": "5.13"
+      },
+      {
+       "file": "specs/text/rinex302.txt",
+       "line": 2779,
+       "pdf_page": 53,
+       "table": "Table A2"
+      }
+     ],
+     "conflict": "5.13 says X band 1; Table A2 says band 0 for type X."
+    }
+   },
+   "notes": ["BDS B1 uses band 1 (C1I/C1Q/C1X) in 3.02 only (Table 7; revision note 26-Mar-2013 [rinex302.txt line 298, pdf p7]).", "Table A19 (phase alignment) BDS B1 row says L1X 'Must be aligned to L2I', a leftover of the band-2 convention [rinex302.txt line 4398, pdf p82].", "GLONASS G3 (band 3) codes appear in Table 3, but the Table A2 band list has no band 3 [rinex302.txt line 2779, pdf p53].", "QZSS L1-SAIF uses attribute Z, but the Table A2 attribute list gives Z only for Galileo.", "QZSS has no L2 C/A row (no C2C/L2C for J).", "Table A2 system list is (G/R/E/J/C/S/M); M is the mixed-file marker, not a satellite system."]
+  },
+  "3.03": {
+   "code_length": 3,
+   "systems": ["G", "R", "E", "S", "J", "C", "I"],
+   "systems_cite": {
+    "file": "specs/text/rinex303.txt",
+    "line": 2816,
+    "pdf_page": 55,
+    "table": "Table A2"
+   },
+   "codes": {
+    "G": {
+     "C": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "5I", "5Q", "5X"],
+     "L": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "D": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "S": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"]
+    },
+    "R": {
+     "C": ["1C", "1P", "2C", "2P", "3I", "3Q", "3X"],
+     "L": ["1C", "1P", "2C", "2P", "3I", "3Q", "3X"],
+     "D": ["1C", "1P", "2C", "2P", "3I", "3Q", "3X"],
+     "S": ["1C", "1P", "2C", "2P", "3I", "3Q", "3X"]
+    },
+    "E": {
+     "C": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "L": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "D": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "S": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"]
+    },
+    "S": {
+     "C": ["1C", "5I", "5Q", "5X"],
+     "L": ["1C", "5I", "5Q", "5X"],
+     "D": ["1C", "5I", "5Q", "5X"],
+     "S": ["1C", "5I", "5Q", "5X"]
+    },
+    "J": {
+     "C": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "6S", "6L", "6X"],
+     "L": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "6S", "6L", "6X"],
+     "D": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "6S", "6L", "6X"],
+     "S": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "6S", "6L", "6X"]
+    },
+    "C": {
+     "C": ["2I", "2Q", "2X", "7I", "7Q", "7X", "6I", "6Q", "6X"],
+     "L": ["2I", "2Q", "2X", "7I", "7Q", "7X", "6I", "6Q", "6X"],
+     "D": ["2I", "2Q", "2X", "7I", "7Q", "7X", "6I", "6Q", "6X"],
+     "S": ["2I", "2Q", "2X", "7I", "7Q", "7X", "6I", "6Q", "6X"]
+    },
+    "I": {
+     "C": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "L": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "D": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "S": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"]
+    }
+   },
+   "bands": {
+    "G": ["1", "2", "5"],
+    "R": ["1", "2", "3"],
+    "E": ["1", "5", "7", "8", "6"],
+    "S": ["1", "5"],
+    "J": ["1", "2", "5", "6"],
+    "C": ["2", "7", "6"],
+    "I": ["5", "9"]
+   },
+   "cite": {
+    "G": {
+     "file": "specs/text/rinex303.txt",
+     "table": "Table 4",
+     "pdf_page": 21,
+     "printed_page": 16,
+     "line": 1017
+    },
+    "R": {
+     "file": "specs/text/rinex303.txt",
+     "table": "Table 5",
+     "pdf_page": 22,
+     "printed_page": 17,
+     "line": 1055
+    },
+    "E": {
+     "file": "specs/text/rinex303.txt",
+     "table": "Table 6",
+     "pdf_page": 22,
+     "printed_page": 17,
+     "line": 1081
+    },
+    "S": {
+     "file": "specs/text/rinex303.txt",
+     "table": "Table 7",
+     "pdf_page": 23,
+     "printed_page": 18,
+     "line": 1102
+    },
+    "J": {
+     "file": "specs/text/rinex303.txt",
+     "table": "Table 8",
+     "pdf_page": 23,
+     "printed_page": 18,
+     "line": 1123
+    },
+    "C": {
+     "file": "specs/text/rinex303.txt",
+     "table": "Table 9",
+     "pdf_page": 24,
+     "printed_page": 19,
+     "line": 1162
+    },
+    "I": {
+     "file": "specs/text/rinex303.txt",
+     "table": "Table 10",
+     "pdf_page": 24,
+     "printed_page": 19,
+     "line": 1181
+    }
+   },
+   "blank_attribute": {
+    "allowed": false,
+    "rule": "Not allowed: 'Unknown tracking modes are not supported in RINEX 3.02 and 3.03'.",
+    "cite": [
+     {
+      "file": "specs/text/rinex303.txt",
+      "line": 974,
+      "pdf_page": 20,
+      "section": "5.1",
+      "printed_page": 15
+     },
+     {
+      "file": "specs/text/rinex303.txt",
+      "line": 2920,
+      "pdf_page": 57,
+      "table": "Table A2",
+      "printed_page": "A8"
+     }
+    ]
+   },
+   "pseudo": {
+    "I": {
+     "meaning": "Ionosphere phase delay (full cycles)",
+     "form": "I<band><blank attribute>; spec gives band '1, 2, ..., 8'",
+     "codes": {
+      "G": ["I1 ", "I2 ", "I5 "],
+      "R": ["I1 ", "I2 ", "I3 "],
+      "E": ["I1 ", "I5 ", "I7 ", "I8 ", "I6 "],
+      "S": ["I1 ", "I5 "],
+      "J": ["I1 ", "I2 ", "I5 ", "I6 "],
+      "C": ["I2 ", "I7 ", "I6 "],
+      "I": ["I5 ", "I9 "]
+     },
+     "basis": "Observed: type I, band 1..8, attribute blank. Inferred: the band list per system is the system's own bands from the code tables (the spec gives only the generic range).",
+     "cite": [
+      {
+       "file": "specs/text/rinex303.txt",
+       "line": 1426,
+       "pdf_page": 29,
+       "section": "5.12"
+      },
+      {
+       "file": "specs/text/rinex304.txt",
+       "line": 582,
+       "pdf_page": 13,
+       "section": "3.04 revision history"
+      }
+     ],
+     "conflict": "3.03 gives n = 1..8 both for observation codes (Table 3) and for the ionosphere pseudo-observable (Table 15), yet Table 10 defines IRNSS band 9 (S). The 3.04 revision history (22-Oct-2018) widens 5.12/Table 15 to 1-9. 'I9 ' is kept for IRNSS in 3.03 (inference)."
+    },
+    "X": {
+     "meaning": "Receiver channel number(s)",
+     "form": "X<band><blank attribute>",
+     "codes": {
+      "G": ["X1 ", "X0 "],
+      "R": ["X1 ", "X0 "],
+      "E": ["X1 ", "X0 "],
+      "S": ["X1 ", "X0 "],
+      "J": ["X1 ", "X0 "],
+      "C": ["X1 ", "X0 "],
+      "I": ["X1 ", "X0 "]
+     },
+     "basis": "Observed conflict: section 5.13 gives band 1; Table A2 band list gives '0 for type X (all)'. Both are listed so neither transcription is silently dropped.",
+     "cite": [
+      {
+       "file": "specs/text/rinex303.txt",
+       "line": 1454,
+       "pdf_page": 29,
+       "section": "5.13"
+      },
+      {
+       "file": "specs/text/rinex303.txt",
+       "line": 2863,
+       "pdf_page": 56,
+       "table": "Table A2"
+      }
+     ],
+     "conflict": "5.13 says X band 1; Table A2 says band 0 for type X."
+    }
+   },
+   "notes": ["BDS B1 back to band 2 (C2I/C2Q/C2X). Table 9 note: when reading a 3.02 file accept C1x and C2x, treat as C2x (a reader tolerance, not a 3.03 code) [rinex303.txt line 1163, pdf p24].", "GLONASS G3 (band 3) codes in Table 5, but Table A2 band list has no band 3 [rinex303.txt line 2863, pdf p56].", "rinex303_update1.txt (3.03 Update 1, 2017-01-25) has the same code tables (only the G2 '7/16' typo fixed)."],
+   "reader_tolerance": {
+    "C": {
+     "when_reading_3.02": "accept C1x and C2x (x=I,Q,X), treat as C2x",
+     "cite": {
+      "file": "specs/text/rinex303.txt",
+      "line": 1163,
+      "pdf_page": 24,
+      "table": "Table 9"
+     }
+    }
+   }
+  },
+  "3.04": {
+   "code_length": 3,
+   "systems": ["G", "R", "E", "S", "J", "C", "I"],
+   "systems_cite": {
+    "file": "specs/text/rinex304.txt",
+    "line": 3118,
+    "pdf_page": 61,
+    "table": "Table A2"
+   },
+   "codes": {
+    "G": {
+     "C": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "5I", "5Q", "5X"],
+     "L": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "D": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "S": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"]
+    },
+    "R": {
+     "C": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "L": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "D": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "S": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"]
+    },
+    "E": {
+     "C": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "L": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "D": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "S": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"]
+    },
+    "S": {
+     "C": ["1C", "5I", "5Q", "5X"],
+     "L": ["1C", "5I", "5Q", "5X"],
+     "D": ["1C", "5I", "5Q", "5X"],
+     "S": ["1C", "5I", "5Q", "5X"]
+    },
+    "J": {
+     "C": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "L": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "D": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "S": ["1C", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"]
+    },
+    "C": {
+     "C": ["2I", "2Q", "2X", "1D", "1P", "1X", "1A", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6A"],
+     "L": ["2I", "2Q", "2X", "1D", "1P", "1X", "1A", "1N", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6A"],
+     "D": ["2I", "2Q", "2X", "1D", "1P", "1X", "1A", "1N", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6A"],
+     "S": ["2I", "2Q", "2X", "1D", "1P", "1X", "1A", "1N", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6A"]
+    },
+    "I": {
+     "C": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "L": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "D": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "S": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"]
+    }
+   },
+   "bands": {
+    "G": ["1", "2", "5"],
+    "R": ["1", "4", "2", "6", "3"],
+    "E": ["1", "5", "7", "8", "6"],
+    "S": ["1", "5"],
+    "J": ["1", "2", "5", "6"],
+    "C": ["2", "1", "5", "7", "8", "6"],
+    "I": ["5", "9"]
+   },
+   "cite": {
+    "G": {
+     "file": "specs/text/rinex304.txt",
+     "table": "Table 4",
+     "pdf_page": 22,
+     "printed_page": 17,
+     "line": 1065
+    },
+    "R": {
+     "file": "specs/text/rinex304.txt",
+     "table": "Table 5",
+     "pdf_page": 23,
+     "printed_page": 18,
+     "line": 1109
+    },
+    "E": {
+     "file": "specs/text/rinex304.txt",
+     "table": "Table 6",
+     "pdf_page": 24,
+     "printed_page": 19,
+     "line": 1170
+    },
+    "S": {
+     "file": "specs/text/rinex304.txt",
+     "table": "Table 7",
+     "pdf_page": 24,
+     "printed_page": 19,
+     "line": 1184
+    },
+    "J": {
+     "file": "specs/text/rinex304.txt",
+     "table": "Table 8",
+     "pdf_page": 25,
+     "printed_page": 20,
+     "line": 1225
+    },
+    "C": {
+     "file": "specs/text/rinex304.txt",
+     "table": "Table 9",
+     "pdf_page": 26,
+     "printed_page": 21,
+     "line": 1285
+    },
+    "I": {
+     "file": "specs/text/rinex304.txt",
+     "table": "Table 10",
+     "pdf_page": 27,
+     "printed_page": 22,
+     "line": 1321
+    }
+   },
+   "blank_attribute": {
+    "allowed": false,
+    "rule": "Not allowed: Table A2 note 'In RINEX 3.02, 3.03 and 3.04 all fields (Type, Band and Attribute) must be defined'.",
+    "conflict": "Section 5.1 of 3.04 still says only 'not supported in RINEX 3.02 and 3.03' (not updated to name 3.04); Table A2 names 3.04 explicitly.",
+    "cite": [
+     {
+      "file": "specs/text/rinex304.txt",
+      "line": 1020,
+      "pdf_page": 21,
+      "section": "5.1",
+      "printed_page": 16
+     },
+     {
+      "file": "specs/text/rinex304.txt",
+      "line": 3222,
+      "pdf_page": 63,
+      "table": "Table A2",
+      "printed_page": "A9"
+     }
+    ]
+   },
+   "pseudo": {
+    "I": {
+     "meaning": "Ionosphere phase delay (full cycles)",
+     "form": "I<band><blank attribute>; spec gives band '1, 2, ..., 9'",
+     "codes": {
+      "G": ["I1 ", "I2 ", "I5 "],
+      "R": ["I1 ", "I4 ", "I2 ", "I6 ", "I3 "],
+      "E": ["I1 ", "I5 ", "I7 ", "I8 ", "I6 "],
+      "S": ["I1 ", "I5 "],
+      "J": ["I1 ", "I2 ", "I5 ", "I6 "],
+      "C": ["I2 ", "I1 ", "I5 ", "I7 ", "I8 ", "I6 "],
+      "I": ["I5 ", "I9 "]
+     },
+     "basis": "Observed: type I, band 1..9, attribute blank. Inferred: the band list per system is the system's own bands from the code tables (the spec gives only the generic range).",
+     "cite": [
+      {
+       "file": "specs/text/rinex304.txt",
+       "line": 1595,
+       "pdf_page": 32,
+       "section": "5.12"
+      }
+     ]
+    },
+    "X": {
+     "meaning": "Receiver channel number(s)",
+     "form": "X<band><blank attribute>",
+     "codes": {
+      "G": ["X1 ", "X0 "],
+      "R": ["X1 ", "X0 "],
+      "E": ["X1 ", "X0 "],
+      "S": ["X1 ", "X0 "],
+      "J": ["X1 ", "X0 "],
+      "C": ["X1 ", "X0 "],
+      "I": ["X1 ", "X0 "]
+     },
+     "basis": "Observed conflict: section 5.13 gives band 1; Table A2 band list gives '0 for type X (all)'. Both are listed so neither transcription is silently dropped.",
+     "cite": [
+      {
+       "file": "specs/text/rinex304.txt",
+       "line": 1623,
+       "pdf_page": 32,
+       "section": "5.13"
+      },
+      {
+       "file": "specs/text/rinex304.txt",
+       "line": 3168,
+       "pdf_page": 62,
+       "table": "Table A2"
+      }
+     ],
+     "conflict": "5.13 says X band 1; Table A2 says band 0 for type X."
+    }
+   },
+   "notes": ["BDS-3 signals added. B1 (band 1) attributes D, P, X, A and codeless N (L1N/D1N/S1N, no C1N); B3A is attribute A on band 6 (C6A). Both are replaced in 3.05 [rinex304.txt line 1267, pdf p26].", "Table 9 note still says 'When reading a RINEX 3.02 file, both C1x and C2x ... treated as C2x in RINEX 3.03'; in 3.04 C1X is also BDS-3 B1C data+pilot, so the tolerance can only apply to 3.02 files [rinex304.txt line 1286, pdf p26].", "QZSS L6E uses attribute E but Table A2 attribute list has no E (added in 3.05 [rinex305.txt line 470, pdf p10]).", "Table A2 band list omits GLONASS G3 (band 3) although Table 5 has C3I/C3Q/C3X [rinex304.txt line 3168, pdf p62].", "Phase table A23 has no BDS L1A or L1N rows."],
+   "reader_tolerance": {
+    "C": {
+     "when_reading_3.02": "accept C1x and C2x, treat as C2x",
+     "cite": {
+      "file": "specs/text/rinex304.txt",
+      "line": 1286,
+      "pdf_page": 26,
+      "table": "Table 9"
+     }
+    }
+   }
+  },
+  "3.05": {
+   "code_length": 3,
+   "systems": ["G", "R", "E", "S", "J", "C", "I"],
+   "systems_cite": {
+    "file": "specs/text/rinex305.txt",
+    "line": 2898,
+    "pdf_page": 53,
+    "table": "Table A2"
+   },
+   "codes": {
+    "G": {
+     "C": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "5I", "5Q", "5X"],
+     "L": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "D": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "S": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"]
+    },
+    "R": {
+     "C": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "L": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "D": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "S": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"]
+    },
+    "E": {
+     "C": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "L": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "D": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "S": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"]
+    },
+    "S": {
+     "C": ["1C", "5I", "5Q", "5X"],
+     "L": ["1C", "5I", "5Q", "5X"],
+     "D": ["1C", "5I", "5Q", "5X"],
+     "S": ["1C", "5I", "5Q", "5X"]
+    },
+    "J": {
+     "C": ["1C", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "L": ["1C", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "D": ["1C", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "S": ["1C", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"]
+    },
+    "C": {
+     "C": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "L": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "D": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "S": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"]
+    },
+    "I": {
+     "C": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "L": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "D": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "S": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"]
+    }
+   },
+   "bands": {
+    "G": ["1", "2", "5"],
+    "R": ["1", "4", "2", "6", "3"],
+    "E": ["1", "5", "7", "8", "6"],
+    "S": ["1", "5"],
+    "J": ["1", "2", "5", "6"],
+    "C": ["2", "1", "5", "7", "8", "6"],
+    "I": ["5", "9"]
+   },
+   "cite": {
+    "G": {
+     "file": "specs/text/rinex305.txt",
+     "table": "Table 14",
+     "pdf_page": 30,
+     "printed_page": 29,
+     "line": 1612
+    },
+    "R": {
+     "file": "specs/text/rinex305.txt",
+     "table": "Table 15",
+     "pdf_page": 31,
+     "printed_page": 30,
+     "line": 1651
+    },
+    "E": {
+     "file": "specs/text/rinex305.txt",
+     "table": "Table 16",
+     "pdf_page": 32,
+     "printed_page": 31,
+     "line": 1714
+    },
+    "S": {
+     "file": "specs/text/rinex305.txt",
+     "table": "Table 17",
+     "pdf_page": 32,
+     "printed_page": 31,
+     "line": 1724
+    },
+    "J": {
+     "file": "specs/text/rinex305.txt",
+     "table": "Table 18",
+     "pdf_page": 33,
+     "printed_page": 32,
+     "line": 1773
+    },
+    "C": {
+     "file": "specs/text/rinex305.txt",
+     "table": "Table 19",
+     "pdf_page": 34,
+     "printed_page": 33,
+     "line": 1839
+    },
+    "I": {
+     "file": "specs/text/rinex305.txt",
+     "table": "Table 20",
+     "pdf_page": 35,
+     "printed_page": 34,
+     "line": 1876
+    }
+   },
+   "blank_attribute": {
+    "allowed": false,
+    "rule": "Not allowed from 3.02 onwards, except the 'X' channel-number pseudo-observable, whose attribute is blank.",
+    "cite": [
+     {
+      "file": "specs/text/rinex305.txt",
+      "line": 1575,
+      "pdf_page": 30,
+      "section": "5.2.17",
+      "printed_page": 29
+     },
+     {
+      "file": "specs/text/rinex305.txt",
+      "line": 3006,
+      "pdf_page": 55,
+      "table": "Table A2",
+      "printed_page": 54
+     }
+    ]
+   },
+   "pseudo": {
+    "X": {
+     "meaning": "Receiver channel number(s) per satellite and band/frequency",
+     "form": "X<band><blank attribute>; spec gives band '1,2,...,9'",
+     "codes": {
+      "G": ["X1 ", "X2 ", "X5 "],
+      "R": ["X1 ", "X4 ", "X2 ", "X6 ", "X3 "],
+      "E": ["X1 ", "X5 ", "X7 ", "X8 ", "X6 "],
+      "S": ["X1 ", "X5 "],
+      "J": ["X1 ", "X2 ", "X5 ", "X6 "],
+      "C": ["X2 ", "X1 ", "X5 ", "X7 ", "X8 ", "X6 "],
+      "I": ["X5 ", "X9 "]
+     },
+     "basis": "Observed: type X, band 1..9, attribute blank (section 5.3.4). Inferred: the band list per system is the system's own bands from the code tables.",
+     "cite": [
+      {
+       "file": "specs/text/rinex305.txt",
+       "line": 2023,
+       "pdf_page": 37,
+       "section": "5.3.4"
+      }
+     ]
+    },
+    "_removed": {
+     "I": {
+      "note": "Ionosphere pseudo-observable removed in 3.05 (revision history 26-Aug-2020).",
+      "cite": [
+       {
+        "file": "specs/text/rinex305.txt",
+        "line": 410,
+        "pdf_page": 9,
+        "section": "revision history"
+       }
+      ]
+     },
+     "X0": {
+      "note": "Band value 0 removed from Table A2 (revision history 14-Sep-2020): 'this value is not allowed'.",
+      "cite": [
+       {
+        "file": "specs/text/rinex305.txt",
+        "line": 434,
+        "pdf_page": 9,
+        "section": "revision history"
+       }
+      ]
+     }
+    }
+   },
+   "notes": ["BDS B1A changes to attributes S/L/Z on band 1 and B3A to D/P/Z on band 6; 3.04's C1A/C6A and codeless L1N/D1N/S1N are no longer in Table 19 [rinex305.txt line 1818, pdf p34].", "QZSS L1Sb (attribute B on band 1) added (revision history 14-Sep-2020 [rinex305.txt line 436, pdf p9]); phase table A23 has no L1B row for QZSS.", "Table A2 attribute list does not list S/L for BDS although Table 19 uses them (B1A)."],
+   "reader_tolerance": {
+    "C": {
+     "when_reading_3.02": "accept 1I/Q/X and 2I/Q/X, treat as 2I/Q/X",
+     "cite": {
+      "file": "specs/text/rinex305.txt",
+      "line": 1840,
+      "pdf_page": 34,
+      "table": "Table 19"
+     }
+    }
+   }
+  },
+  "4.00": {
+   "code_length": 3,
+   "systems": ["G", "R", "E", "S", "J", "C", "I"],
+   "systems_cite": {
+    "file": "specs/text/rinex_4.00.txt",
+    "line": 3030,
+    "pdf_page": 57,
+    "table": "Table A2"
+   },
+   "codes": {
+    "G": {
+     "C": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "5I", "5Q", "5X"],
+     "L": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "D": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"],
+     "S": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "5I", "5Q", "5X"]
+    },
+    "R": {
+     "C": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "L": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "D": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "S": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"]
+    },
+    "E": {
+     "C": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "L": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "D": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "S": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"]
+    },
+    "S": {
+     "C": ["1C", "5I", "5Q", "5X"],
+     "L": ["1C", "5I", "5Q", "5X"],
+     "D": ["1C", "5I", "5Q", "5X"],
+     "S": ["1C", "5I", "5Q", "5X"]
+    },
+    "J": {
+     "C": ["1C", "1E", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "L": ["1C", "1E", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "D": ["1C", "1E", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "S": ["1C", "1E", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"]
+    },
+    "C": {
+     "C": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "L": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "D": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "S": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"]
+    },
+    "I": {
+     "C": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "L": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "D": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "S": ["5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"]
+    }
+   },
+   "bands": {
+    "G": ["1", "2", "5"],
+    "R": ["1", "4", "2", "6", "3"],
+    "E": ["1", "5", "7", "8", "6"],
+    "S": ["1", "5"],
+    "J": ["1", "2", "5", "6"],
+    "C": ["2", "1", "5", "7", "8", "6"],
+    "I": ["5", "9"]
+   },
+   "cite": {
+    "G": {
+     "file": "specs/text/rinex_4.00.txt",
+     "table": "Table 10",
+     "pdf_page": 27,
+     "printed_page": 26,
+     "line": 1374
+    },
+    "R": {
+     "file": "specs/text/rinex_4.00.txt",
+     "table": "Table 11",
+     "pdf_page": 28,
+     "printed_page": 27,
+     "line": 1423
+    },
+    "E": {
+     "file": "specs/text/rinex_4.00.txt",
+     "table": "Table 12",
+     "pdf_page": 29,
+     "printed_page": 28,
+     "line": 1476
+    },
+    "S": {
+     "file": "specs/text/rinex_4.00.txt",
+     "table": "Table 13",
+     "pdf_page": 29,
+     "printed_page": 28,
+     "line": 1503
+    },
+    "J": {
+     "file": "specs/text/rinex_4.00.txt",
+     "table": "Table 14",
+     "pdf_page": 30,
+     "printed_page": 29,
+     "line": 1533
+    },
+    "C": {
+     "file": "specs/text/rinex_4.00.txt",
+     "table": "Table 15",
+     "pdf_page": 31,
+     "printed_page": 30,
+     "line": 1592
+    },
+    "I": {
+     "file": "specs/text/rinex_4.00.txt",
+     "table": "Table 16",
+     "pdf_page": 32,
+     "printed_page": 31,
+     "line": 1643
+    }
+   },
+   "blank_attribute": {
+    "allowed": false,
+    "rule": "As 3.05 (blank only for the 'X' pseudo-observable).",
+    "cite": [
+     {
+      "file": "specs/text/rinex_4.00.txt",
+      "line": 1367,
+      "pdf_page": 27,
+      "section": "5.2.17",
+      "printed_page": 26
+     },
+     {
+      "file": "specs/text/rinex_4.00.txt",
+      "line": 3145,
+      "pdf_page": 59,
+      "table": "Table A2",
+      "printed_page": 58
+     }
+    ]
+   },
+   "pseudo": {
+    "X": {
+     "meaning": "Receiver channel number(s) per satellite and band/frequency",
+     "form": "X<band><blank attribute>; spec gives band '1,2,...,9'",
+     "codes": {
+      "G": ["X1 ", "X2 ", "X5 "],
+      "R": ["X1 ", "X4 ", "X2 ", "X6 ", "X3 "],
+      "E": ["X1 ", "X5 ", "X7 ", "X8 ", "X6 "],
+      "S": ["X1 ", "X5 "],
+      "J": ["X1 ", "X2 ", "X5 ", "X6 "],
+      "C": ["X2 ", "X1 ", "X5 ", "X7 ", "X8 ", "X6 "],
+      "I": ["X5 ", "X9 "]
+     },
+     "basis": "Observed: type X, band 1..9, attribute blank (section 5.3.4). Inferred: the band list per system is the system's own bands from the code tables.",
+     "cite": [
+      {
+       "file": "specs/text/rinex_4.00.txt",
+       "line": 1799,
+       "pdf_page": 34,
+       "section": "5.3.4"
+      }
+     ]
+    }
+   },
+   "notes": ["QZSS L1 C/B (attribute E on band 1: C1E/L1E/D1E/S1E) added [rinex_4.00.txt line 1538, pdf p30].", "Table 15 BDS note drops the '3.02' qualifier: 'When reading a RINEX file, both 1I/Q/X and 2I/Q/X ... treated the same as 2I/Q/X'. Read literally it would collide with B1C data+pilot C1X [rinex_4.00.txt line 1624, pdf p31]."],
+   "reader_tolerance": {
+    "C": {
+     "when_reading": "accept 1I/Q/X and 2I/Q/X, treat as 2I/Q/X (no version qualifier)",
+     "cite": {
+      "file": "specs/text/rinex_4.00.txt",
+      "line": 1624,
+      "pdf_page": 31,
+      "table": "Table 15"
+     }
+    }
+   }
+  },
+  "4.01": {
+   "code_length": 3,
+   "systems": ["G", "R", "E", "S", "J", "C", "I"],
+   "systems_cite": {
+    "file": "specs/text/rinex_4.01.txt",
+    "line": 3311,
+    "pdf_page": 61,
+    "table": "Table A2"
+   },
+   "codes": {
+    "G": {
+     "C": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1R", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2R", "5I", "5Q", "5X"],
+     "L": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "1R", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "2R", "5I", "5Q", "5X"],
+     "D": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "1R", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "2R", "5I", "5Q", "5X"],
+     "S": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "1R", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "2R", "5I", "5Q", "5X"]
+    },
+    "R": {
+     "C": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "L": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "D": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "S": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"]
+    },
+    "E": {
+     "C": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "L": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "D": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "S": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"]
+    },
+    "S": {
+     "C": ["1C", "5I", "5Q", "5X"],
+     "L": ["1C", "5I", "5Q", "5X"],
+     "D": ["1C", "5I", "5Q", "5X"],
+     "S": ["1C", "5I", "5Q", "5X"]
+    },
+    "J": {
+     "C": ["1C", "1E", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "L": ["1C", "1E", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "D": ["1C", "1E", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "S": ["1C", "1E", "1S", "1L", "1X", "1Z", "1B", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"]
+    },
+    "C": {
+     "C": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "L": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "D": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "S": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"]
+    },
+    "I": {
+     "C": ["1D", "1P", "1X", "5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "L": ["1D", "1P", "1X", "5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "D": ["1D", "1P", "1X", "5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "S": ["1D", "1P", "1X", "5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"]
+    }
+   },
+   "bands": {
+    "G": ["1", "2", "5"],
+    "R": ["1", "4", "2", "6", "3"],
+    "E": ["1", "5", "7", "8", "6"],
+    "S": ["1", "5"],
+    "J": ["1", "2", "5", "6"],
+    "C": ["2", "1", "5", "7", "8", "6"],
+    "I": ["1", "5", "9"]
+   },
+   "cite": {
+    "G": {
+     "file": "specs/text/rinex_4.01.txt",
+     "table": "Table 10",
+     "pdf_page": 29,
+     "printed_page": 28,
+     "line": 1501
+    },
+    "R": {
+     "file": "specs/text/rinex_4.01.txt",
+     "table": "Table 11",
+     "pdf_page": 30,
+     "printed_page": 29,
+     "line": 1556
+    },
+    "E": {
+     "file": "specs/text/rinex_4.01.txt",
+     "table": "Table 12",
+     "pdf_page": 31,
+     "printed_page": 30,
+     "line": 1619
+    },
+    "S": {
+     "file": "specs/text/rinex_4.01.txt",
+     "table": "Table 13",
+     "pdf_page": 31,
+     "printed_page": 30,
+     "line": 1646
+    },
+    "J": {
+     "file": "specs/text/rinex_4.01.txt",
+     "table": "Table 14",
+     "pdf_page": 32,
+     "printed_page": 31,
+     "line": 1676
+    },
+    "C": {
+     "file": "specs/text/rinex_4.01.txt",
+     "table": "Table 15",
+     "pdf_page": 33,
+     "printed_page": 32,
+     "line": 1735
+    },
+    "I": {
+     "file": "specs/text/rinex_4.01.txt",
+     "table": "Table 16",
+     "pdf_page": 34,
+     "printed_page": 33,
+     "line": 1786
+    }
+   },
+   "blank_attribute": {
+    "allowed": false,
+    "rule": "As 3.05 (blank only for the 'X' pseudo-observable).",
+    "cite": [
+     {
+      "file": "specs/text/rinex_4.01.txt",
+      "line": 1448,
+      "pdf_page": 28,
+      "section": "5.2.17",
+      "printed_page": 27
+     }
+    ]
+   },
+   "pseudo": {
+    "X": {
+     "meaning": "Receiver channel number(s) per satellite and band/frequency",
+     "form": "X<band><blank attribute>; spec gives band '1,2,...,9'",
+     "codes": {
+      "G": ["X1 ", "X2 ", "X5 "],
+      "R": ["X1 ", "X4 ", "X2 ", "X6 ", "X3 "],
+      "E": ["X1 ", "X5 ", "X7 ", "X8 ", "X6 "],
+      "S": ["X1 ", "X5 "],
+      "J": ["X1 ", "X2 ", "X5 ", "X6 "],
+      "C": ["X2 ", "X1 ", "X5 ", "X7 ", "X8 ", "X6 "],
+      "I": ["X1 ", "X5 ", "X9 "]
+     },
+     "basis": "Observed: type X, band 1..9, attribute blank (section 5.3.4). Inferred: the band list per system is the system's own bands from the code tables.",
+     "cite": [
+      {
+       "file": "specs/text/rinex_4.01.txt",
+       "line": 1941,
+       "pdf_page": 36,
+       "section": "5.3.4"
+      }
+     ]
+    }
+   },
+   "notes": ["GPS M-code via RMP antenna (attribute R) added on L1 and L2: C1R/L1R/D1R/S1R, C2R/L2R/D2R/S2R [rinex_4.01.txt line 1529, pdf p29].", "Phase table A39 lists 'M (RMP) L1R' under GPS L2 as well as L1 (no L2R row); Table 10 has L2R, so L2R is kept [rinex_4.01.txt line 6635, pdf p115].", "NavIC L1 (band 1, attributes D/P/X) added [rinex_4.01.txt line 1790, pdf p34].", "Table 15 BDS note as in 4.00 (no version qualifier) [rinex_4.01.txt line 1767, pdf p33]."],
+   "reader_tolerance": {
+    "C": {
+     "when_reading": "accept 1I/Q/X and 2I/Q/X, treat as 2I/Q/X (no version qualifier)",
+     "cite": {
+      "file": "specs/text/rinex_4.01.txt",
+      "line": 1767,
+      "pdf_page": 33,
+      "table": "Table 15"
+     }
+    }
+   }
+  },
+  "4.02": {
+   "code_length": 3,
+   "systems": ["G", "R", "E", "S", "J", "C", "I"],
+   "systems_cite": {
+    "file": "specs/text/rinex_4.02.txt",
+    "line": 3397,
+    "pdf_page": 63,
+    "table": "Table A2"
+   },
+   "codes": {
+    "G": {
+     "C": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1R", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2R", "5I", "5Q", "5X"],
+     "L": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "1R", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "2R", "5I", "5Q", "5X"],
+     "D": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "1R", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "2R", "5I", "5Q", "5X"],
+     "S": ["1C", "1S", "1L", "1X", "1P", "1W", "1Y", "1M", "1N", "1R", "2C", "2D", "2S", "2L", "2X", "2P", "2W", "2Y", "2M", "2N", "2R", "5I", "5Q", "5X"]
+    },
+    "R": {
+     "C": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "L": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "D": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"],
+     "S": ["1C", "1P", "4A", "4B", "4X", "2C", "2P", "6A", "6B", "6X", "3I", "3Q", "3X"]
+    },
+    "E": {
+     "C": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "L": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "D": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"],
+     "S": ["1A", "1B", "1C", "1X", "1Z", "5I", "5Q", "5X", "7I", "7Q", "7X", "8I", "8Q", "8X", "6A", "6B", "6C", "6X", "6Z"]
+    },
+    "S": {
+     "C": ["1C", "5I", "5Q", "5X"],
+     "L": ["1C", "5I", "5Q", "5X"],
+     "D": ["1C", "5I", "5Q", "5X"],
+     "S": ["1C", "5I", "5Q", "5X"]
+    },
+    "J": {
+     "C": ["1C", "1E", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "L": ["1C", "1E", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "D": ["1C", "1E", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"],
+     "S": ["1C", "1E", "1S", "1L", "1X", "1Z", "2S", "2L", "2X", "5I", "5Q", "5X", "5D", "5P", "5Z", "6S", "6L", "6X", "6E", "6Z"]
+    },
+    "C": {
+     "C": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "L": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "D": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"],
+     "S": ["2I", "2Q", "2X", "1D", "1P", "1X", "1S", "1L", "1Z", "5D", "5P", "5X", "7I", "7Q", "7X", "7D", "7P", "7Z", "8D", "8P", "8X", "6I", "6Q", "6X", "6D", "6P", "6Z"]
+    },
+    "I": {
+     "C": ["1D", "1P", "1X", "5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "L": ["1D", "1P", "1X", "5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "D": ["1D", "1P", "1X", "5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"],
+     "S": ["1D", "1P", "1X", "5A", "5B", "5C", "5X", "9A", "9B", "9C", "9X"]
+    }
+   },
+   "bands": {
+    "G": ["1", "2", "5"],
+    "R": ["1", "4", "2", "6", "3"],
+    "E": ["1", "5", "7", "8", "6"],
+    "S": ["1", "5"],
+    "J": ["1", "2", "5", "6"],
+    "C": ["2", "1", "5", "7", "8", "6"],
+    "I": ["1", "5", "9"]
+   },
+   "cite": {
+    "G": {
+     "file": "specs/text/rinex_4.02.txt",
+     "table": "Table 10",
+     "pdf_page": 30,
+     "printed_page": 29,
+     "line": 1556
+    },
+    "R": {
+     "file": "specs/text/rinex_4.02.txt",
+     "table": "Table 11",
+     "pdf_page": 31,
+     "printed_page": 30,
+     "line": 1611
+    },
+    "E": {
+     "file": "specs/text/rinex_4.02.txt",
+     "table": "Table 12",
+     "pdf_page": 32,
+     "printed_page": 31,
+     "line": 1674
+    },
+    "S": {
+     "file": "specs/text/rinex_4.02.txt",
+     "table": "Table 13",
+     "pdf_page": 32,
+     "printed_page": 31,
+     "line": 1701
+    },
+    "J": {
+     "file": "specs/text/rinex_4.02.txt",
+     "table": "Table 14",
+     "pdf_page": 33,
+     "printed_page": 32,
+     "line": 1731
+    },
+    "C": {
+     "file": "specs/text/rinex_4.02.txt",
+     "table": "Table 15",
+     "pdf_page": 34,
+     "printed_page": 33,
+     "line": 1788
+    },
+    "I": {
+     "file": "specs/text/rinex_4.02.txt",
+     "table": "Table 16",
+     "pdf_page": 35,
+     "printed_page": 34,
+     "line": 1838
+    }
+   },
+   "blank_attribute": {
+    "allowed": false,
+    "rule": "As 3.05 (blank only for the 'X' pseudo-observable).",
+    "cite": [
+     {
+      "file": "specs/text/rinex_4.02.txt",
+      "line": 1507,
+      "pdf_page": 29,
+      "section": "5.2.17",
+      "printed_page": 28
+     }
+    ]
+   },
+   "pseudo": {
+    "X": {
+     "meaning": "Receiver channel number(s) per satellite and band/frequency",
+     "form": "X<band><blank attribute>; spec gives band '1,2,...,9'",
+     "codes": {
+      "G": ["X1 ", "X2 ", "X5 "],
+      "R": ["X1 ", "X4 ", "X2 ", "X6 ", "X3 "],
+      "E": ["X1 ", "X5 ", "X7 ", "X8 ", "X6 "],
+      "S": ["X1 ", "X5 "],
+      "J": ["X1 ", "X2 ", "X5 ", "X6 "],
+      "C": ["X2 ", "X1 ", "X5 ", "X7 ", "X8 ", "X6 "],
+      "I": ["X1 ", "X5 ", "X9 "]
+     },
+     "basis": "Observed: type X, band 1..9, attribute blank (section 5.3.4). Inferred: the band list per system is the system's own bands from the code tables.",
+     "cite": [
+      {
+       "file": "specs/text/rinex_4.02.txt",
+       "line": 1984,
+       "pdf_page": 37,
+       "section": "5.3.4"
+      }
+     ]
+    }
+   },
+   "notes": ["QZSS L1Sb row in Table 14 shows '-' in every code column; footnote: 'listed for completeness, but removed from this table as already covered by the SBAS Observation Codes in Table 13'. So J has no 1B codes in 4.02 [rinex_4.02.txt line 1741, pdf p33]. The same update says 'No format changes were introduced with this update' [rinex_4.02.txt line 571, pdf p11], and phase table A45 still lists QZSS L1Sb L1B (N/A) [rinex_4.02.txt line 7440, pdf p129]: a policy point for the user.", "Phase table A45 lists 'M (RMP) L1R' under GPS L2 (no L2R row); Table 10 has L2R, so L2R is kept [rinex_4.02.txt line 7379, pdf p128].", "BDS 3.02 reader-tolerance note removed from Table 15 (revision history Jun 2025 [rinex_4.02.txt line 561, pdf p11])."]
+  }
+ }
+}

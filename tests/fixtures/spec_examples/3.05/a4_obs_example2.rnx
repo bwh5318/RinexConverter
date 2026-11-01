@@ -1,0 +1,46 @@
+     3.05           OBSERVATION DATA    M                   RINEX VERSION / TYPE
+sbf2rin-9.3.3                           20140511 000610 LCL PGM / RUN BY / DATE
+faa1                                                        MARKER NAME
+92201M012                                                   MARKER NUMBER
+Unknown             Unknown                                 OBSERVER / AGENCY
+3001320             SEPT POLARX4        2.5.1p1             REC # / TYPE / VERS
+725235              LEIAR25.R4      NONE                    ANT # / TYPE
+ -5246415.0000 -3077260.0000 -1913842.0000                  APPROX POSITION XYZ
+        0.1262        0.0000        0.0000                  ANTENNA: DELTA H/E/N
+G   18 C1C L1C D1C S1C C1W S1W C2W L2W D2W S2W C2L L2L D2L  SYS / # / OBS TYPES
+       S2L C5Q L5Q D5Q S5Q                                  SYS / # / OBS TYPES
+E   16 C1C L1C D1C S1C C5Q L5Q D5Q S5Q C7Q L7Q D7Q S7Q C8Q  SYS / # / OBS TYPES
+       L8Q D8Q S8Q                                          SYS / # / OBS TYPES
+S    4 C1C L1C D1C S1C                                      SYS / # / OBS TYPES
+R   12 C1C L1C D1C S1C C2P L2P D2P S2P C2C L2C D2C S2C      SYS / # / OBS TYPES
+C    8 C2I L2I D2I S2I C7I L7I D7I S7I                      SYS / # / OBS TYPES
+J   12 C1C L1C D1C S1C C2L L2L D2L S2L C5Q L5Q D5Q S5Q      SYS / # / OBS TYPES
+G L1C                                                       SYS / PHASE SHIFT
+G L2W                                                       SYS / PHASE SHIFT
+G L2L  0.00000                                              SYS / PHASE SHIFT
+G L5Q  0.00000                                              SYS / PHASE SHIFT
+E L1C  0.00000                                              SYS / PHASE SHIFT
+E L5Q  0.00000                                              SYS / PHASE SHIFT
+E L7Q  0.00000                                              SYS / PHASE SHIFT
+E L8Q  0.00000                                              SYS / PHASE SHIFT
+S L1C                                                       SYS / PHASE SHIFT
+R L1C                                                       SYS / PHASE SHIFT
+R L2P  0.00000                                              SYS / PHASE SHIFT
+R L2C                                                       SYS / PHASE SHIFT
+C L2I                                                       SYS / PHASE SHIFT
+C L7I                                                       SYS / PHASE SHIFT
+J L1C                                                       SYS / PHASE SHIFT
+J L2L  0.00000                                              SYS / PHASE SHIFT
+J L5Q  0.00000                                              SYS / PHASE SHIFT
+    30.000                                                  INTERVAL
+  2014     5    10     0     0    0.0000000     GPS         TIME OF FIRST OBS
+  2014     5    10    23    59   30.0000000     GPS         TIME OF LAST OBS
+    72                                                      # OF SATELLITES
+ C1C    0.000 C2C    0.000 C2P    0.000                     GLONASS COD/PHS/BIS
+DBHZ                                                        SIGNAL STRENGTH UNIT
+ 24 R01  1 R02 -4 R03  5 R04  6 R05  1 R06 -4 R07  5 R08  6 GLONASS SLOT / FRQ #
+    R09 -2 R10 -7 R11  0 R12 -1 R13 -2 R14 -7 R15  0 R16 -1 GLONASS SLOT / FRQ #
+    R17  4 R18 -3 R19  3 R20  2 R21  4 R22 -3 R23  3 R24  2 GLONASS SLOT / FRQ #
+                                                            END OF HEADER
+> 2014 05 10 00 00  0.0000000  0 28
+END OF FILE                                                 COMMENT

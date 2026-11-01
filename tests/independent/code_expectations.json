@@ -1,0 +1,61 @@
+{
+  "_doc": "Independent signal classes for the token comparator (PLAN \u00a71.5a). Written from the spec tables (rinex211.txt \u00a710.1.1 / Table A1; rinex305.txt Tables 14-20; rinex_4.02.txt Tables 10-16), NOT from rinexcore/spec. A token's class is SYSTEM:TYPE:BAND[:GROUP]. RINEX 2 code letters C and P are distinguished for GPS and GLONASS by GROUP; RINEX 3 attributes map onto the same GROUPs. BeiDou B1I is band 1 in 3.02 and band 2 elsewhere (3.01, 3.03+, and the 2-char 'C2' family). The only BeiDou band-1 signal with attribute I or Q any version defines is B1I (3.02, rinex302.txt p.20), so band-1 I/Q is B1I whatever the file's version; band-1 X is B1I before 3.04 and B1C from 3.04 (rinex304.txt p.26). Band 2 (1561.098 MHz) with I, Q or X is B1I in every version that defines it (rinex301.txt Table 5 'E2', rinex305.txt Table 19 'B1 / 1561.098'); 3.02 defines no BeiDou band 2, so a 3.02 file's C2I is B1I too.",
+  "v3_code_groups": {
+    "G": {
+      "C1": {
+        "C": "CA",
+        "W": "P",
+        "P": "P",
+        "Y": "P",
+        "M": "P",
+        "D": "P",
+        "S": "L1C",
+        "L": "L1C",
+        "X": "L1C",
+        "R": "RMP"
+      },
+      "C2": {
+        "W": "P",
+        "P": "P",
+        "Y": "P",
+        "M": "P",
+        "D": "P",
+        "C": "L2C",
+        "S": "L2C",
+        "L": "L2C",
+        "X": "L2C",
+        "R": "RMP"
+      }
+    },
+    "R": {
+      "C1": {
+        "C": "CA",
+        "P": "P"
+      },
+      "C2": {
+        "C": "CA",
+        "P": "P"
+      }
+    }
+  },
+  "v2_code_groups": {
+    "G": {
+      "C1": "CA",
+      "P1": "P",
+      "C2": "L2C",
+      "P2": "P"
+    },
+    "R": {
+      "C1": "CA",
+      "P1": "P",
+      "C2": "CA",
+      "P2": "P"
+    }
+  },
+  "bds_b1i_band": {
+    "3.02": "1",
+    "default": "2"
+  },
+  "bds_band1_IQ_always_b1i": true,
+  "bds_band2_IQX_always_b1i": true
+}

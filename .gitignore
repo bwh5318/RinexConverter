@@ -1,0 +1,10 @@
+data/
+reference/
+.codex-agents/
+tools/oracles/*/
+__pycache__/
+*.pyc
+*.part
+cddislogin.txt
+specs/hatanaka/*.tar.gz
+.pytest_cache/

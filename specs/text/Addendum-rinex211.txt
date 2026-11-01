@@ -1,0 +1,52 @@
+
+
+===== page 1 =====
+                               06-July 2020
+
+
+            RINEX 2.11: Compression Method Clarification Addendum
+            *****************************************************
+
+                                 Nacho Romero
+                           IGS RINEX Working Group
+                      ESA/ESOC Navigation Support Office
+
+                                Ryan Ruddick
+                            Geoscience Australia
+                             Canberra, Australia
+
+
+As technology has moved on and UNIX compress becomes increasingly difficult to find for file
+compression we clarify in this short addendum that compressing Rinex 2 files using gzip is now
+recommended.
+
+
+1. THE COMPRESSION OF RINEX FILES:
+
+
+When data transmission times or storage volumes are critical we recommend
+compressing the files prior to storage or transmission using 'GZIP' AND 'GUNZIP'
+to compress and uncompress. Compatible routines are available on
+all Linux, UNIX and PC systems.
+
+Proposed file name extensions for the compressed files:
+
+  +--------------------------------------------------------------+
+  | File Types                      All platforms                |
+  |                                 uncompressed    compressed   |
+  +--------------------------------------------------------------+
+  | Obs Files                            .yyO       .yyO.gz      |
+  | Obs Files (Hatanaka compressed)      .yyD       .yyD.gz      |
+  | GPS Nav Files                        .yyN       .yyN.gz      |
+  | GLONASS Nav File                     .yyG       .yyG.gz      |
+  | Galileo Nav File                     .yyL       .yyL.gz      |
+  | GEO Nav Files                        .yyH       .yyH.gz      |
+  | GEO SBAS Broadcast Files (sep. doc.) .yyB       .yyB.gz      |
+  | Met Data Files                       .yyM       .yyM.gz      |
+  | Clock Files (see sep.doc.)           .yyC       .yyC.gz      |
+  +--------------------------------------------------------------+
+
+References for the Hatanaka compression scheme: See e.g.
+
+  - ftp://terras.gsi.go.jp/software
+  - IGSMails 1525,1686,1726,1763,1785,4967,4969,4975

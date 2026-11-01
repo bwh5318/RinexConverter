@@ -1,0 +1,608 @@
+{
+ "_doc": "Pre-authorised losses (PLAN §1 clause 4), written by hand from the specs. A conversion report's loss entry is allowed only if a rule below matches (kind, source version, target version, category). 'category' is matched exactly or, when it ends in ':*', as a prefix. Version bounds are inclusive; 'when' adds a condition the checker evaluates (tests/independent/allowed.py). The cell matrix (docs/CONVERSION_MATRIX.md) is generated from these rules.",
+ "systems": {
+  "_doc": "Satellite systems each version's observation files define (rinex210.txt §3/Table A1: G R S T; rinex211.txt §10.1.3: + E; rinex301.txt p.8: + C; rinex302.txt: + J; rinex303.txt: + I). Transit (T) was removed in 2.11.",
+  "2.10": "GRST",
+  "2.11": "GRES",
+  "3.00": "GRES",
+  "3.01": "GRESC",
+  "3.02": "GRESCJ",
+  "3.03": "GRESCJI",
+  "3.04": "GRESCJI",
+  "3.05": "GRESCJI",
+  "4.00": "GRESCJI",
+  "4.01": "GRESCJI",
+  "4.02": "GRESCJI"
+ },
+ "nav_v2_systems": {
+  "_doc": "RINEX 2 nav file types: n GPS, g GLONASS, h GEO/SBAS (rinex211.txt Tables A3, A10, A15)",
+  "systems": "GRS"
+ },
+ "rules": [
+  {
+   "kind": "obs",
+   "category": "system-not-representable:*",
+   "when": "system-not-in-target",
+   "cite": "systems table above"
+  },
+  {
+   "kind": "obs",
+   "category": "epoch-emptied-by-system-removal",
+   "when": "with-record-removal",
+   "cite": "an epoch whose only satellite records belong to a dropped system, or (RINEX 3/4 targets) have no type the target defines under their list (each type claimed obs-code-not-representable; a RINEX 3/4 record holds the fields of its system's SYS / # / OBS TYPES only: rinex305.txt Table A3 p.58), has nothing left to hold; between RINEX 2 and 3/4 a type list is rebuilt from the columns that hold data, so a record blank in every column has none either"
+  },
+  {
+   "kind": "obs",
+   "category": "obs-code-not-representable:*",
+   "when": "code-not-in-target",
+   "cite": "per-version code tables: rinex211.txt §10.1.1, rinex305.txt Tables 14-20, rinex_4.02.txt Tables 10-16; e.g. BDS B1C has no 3.02 code, GPS L1C no RINEX 2 code; checked per code against tests/expectations/code_validity.json"
+  },
+  {
+   "kind": "obs",
+   "category": "obs-code-collapsed:*",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "RINEX 2 has one 2-character code per band and type (rinex211.txt Table A1): several RINEX 3 attributes map onto one"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:MARKER TYPE",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2 (3.x only)"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:SIGNAL STRENGTH UNIT",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: DELTA X/Y/Z",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: PHASECENTER",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: B.SIGHT XYZ",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: ZERODIR AZI",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: ZERODIR XYZ",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:CENTER OF MASS: XYZ",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:SYS / DCBS APPLIED",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:SYS / PCVS APPLIED",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:GLONASS SLOT / FRQ #",
+   "source": [
+    "3.01",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "3.00"
+   ],
+   "cite": "optional in 3.01 (rinex301.txt p.32), mandatory from 3.02; no RINEX 2 or 3.00 form"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:GLONASS COD/PHS/BIS",
+   "source": [
+    "3.02",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "3.01"
+   ],
+   "cite": "defined from 3.02 (rinex302.txt Table A2)"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:DOI",
+   "when": "source-ne-target",
+   "target": [
+    "2.10",
+    "3.05"
+   ],
+   "cite": "defined only from 4.00 (rinex_4.00.txt Table A2); also met in 3.05 files from some writers (e.g. JPS2RIN 2.1), where a same-version conversion carries it"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:LICENSE OF USE",
+   "when": "source-ne-target",
+   "target": [
+    "2.10",
+    "3.05"
+   ],
+   "cite": "defined only from 4.00 (rinex_4.00.txt Table A2); a same-version conversion of a file that already has it carries it"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:STATION INFORMATION",
+   "when": "source-ne-target",
+   "target": [
+    "2.10",
+    "3.05"
+   ],
+   "cite": "defined only from 4.00 (rinex_4.00.txt Table A2); a same-version conversion of a file that already has it carries it"
+  },
+  {
+   "kind": "obs",
+   "category": "event-record-not-representable:*",
+   "when": "label-not-in-target",
+   "cite": "header records inside flag 2-5 events follow the header tables (rinex305.txt §5.3.2)"
+  },
+  {
+   "kind": "obs",
+   "category": "event-record-deprecated:*",
+   "when": "label-deprecated-in-target",
+   "source": [
+    "3.01",
+    "3.05"
+   ],
+   "target": [
+    "4.00",
+    "4.02"
+   ],
+   "cite": "SYS / PHASE SHIFT and GLONASS COD/PHS/BIS are strongly deprecated in RINEX 4: 'the lines should be ignored by RINEX decoders and encoders' (rinex_4.00.txt Table A2 p.61, lines 3229-3233 and 3269-3273; the same in 4.01 and 4.02)"
+  },
+  {
+   "kind": "obs",
+   "category": "event-emptied",
+   "when": "with-event-loss",
+   "cite": "a flag-4 event ('header information follows', rinex305.txt Table A3 p.59-60) whose records were all unrepresentable or deprecated, or described only a system or phase entry the target drops (QZSS is defined from 3.02: absent from rinex301.txt), is dropped"
+  },
+  {
+   "kind": "obs",
+   "category": "header-field-not-representable:LEAP SECONDS",
+   "source": [
+    "3.01",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "3.02"
+   ],
+   "cite": "LEAP SECONDS: I6 in 2.x/3.00, 4I6 in 3.01/3.02, 4I6,A3 from 3.03 (rinex300.txt ~1898, rinex301.txt ~2137, rinex303.txt Table A2)"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-shift-record-not-representable",
+   "source": [
+    "3.01",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "3.00"
+   ],
+   "cite": "SYS / PHASE SHIFT exists from 3.01 (rinex301.txt §9.1); PLAN §3.3 rule 5"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-shift-record-deprecated",
+   "source": [
+    "3.01",
+    "3.05"
+   ],
+   "target": [
+    "4.00",
+    "4.02"
+   ],
+   "cite": "rinex_4.00.txt §5.2.12: strongly deprecated, to be ignored by encoders"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-shift-entry-dropped:*",
+   "source": [
+    "3.01",
+    "3.05"
+   ],
+   "target": [
+    "3.01",
+    "3.05"
+   ],
+   "when": "source-ne-target",
+   "cite": "an entry whose observation code the target cannot hold"
+  },
+  {
+   "kind": "obs",
+   "category": "epoch-precision",
+   "source": [
+    "4.02",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "4.01"
+   ],
+   "cite": "the picosecond extension exists only in 4.02 (rinex_4.02.txt Table A3)"
+  },
+  {
+   "kind": "obs",
+   "category": "clock-precision",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "receiver clock F15.12 in 3.x/4.x, F12.9 in 2.x (rinex305.txt Table A3, rinex211.txt Table A2)"
+  },
+  {
+   "kind": "obs",
+   "category": "clock-overflow",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "F12.9 range"
+  },
+  {
+   "kind": "obs",
+   "category": "scale-factor-rounding:*",
+   "source": [
+    "3.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "RINEX 2 has no scale-factor record: values are divided and rounded to F14.3 (rinex305.txt §5.2.11)"
+  },
+  {
+   "kind": "obs",
+   "category": "system-removed-unresolvable:*",
+   "when": "drop-unresolvable",
+   "cite": "PLAN §1 clause 8"
+  },
+  {
+   "kind": "nav",
+   "category": "system-not-representable:*",
+   "when": "nav-system-not-in-target",
+   "cite": "nav_v2_systems / systems tables"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-message-not-representable:*",
+   "source": [
+    "4.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "3.05"
+   ],
+   "cite": "only LNAV, FDMA, INAV/FNAV, D1/D2, SBAS have RINEX 3 forms (PLAN §3.5; rinex_4.02.txt §5.4)"
+  },
+  {
+   "kind": "nav",
+   "category": "glonass-nav-line5-dropped",
+   "source": [
+    "3.05",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "3.04"
+   ],
+   "cite": "GLONASS BROADCAST ORBIT - 4 exists from 3.05 (rinex305.txt Table A10)"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-correction-precision:*",
+   "when": "source-ne-target",
+   "cite": "DELTA-UTC D19.12 vs TIME SYSTEM CORR D17.10/D16.9 (rinex211.txt Table A3, rinex305.txt Table A5); RINEX 4 E19.12 vs D12.4/D17.10"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-correction-not-representable:*",
+   "when": "nav-corr-not-in-target",
+   "cite": "RINEX 2 holds only GPS ION/DELTA-UTC, GLONASS and SBAS time corrections; RINEX 3 one header value per type; EOP and BDGIM have no RINEX 3 form; a 4.00/4.01 QZSS CNVX ION record has no 4.02 form, which needs its area WIDE/JAPN (rinex_4.02.txt Table 25 p.40); checked per type against the target's header records / RINEX 4 records"
+  },
+  {
+   "kind": "nav",
+   "category": "header-field-not-representable:*",
+   "when": "source-ne-target",
+   "cite": "A2 of STO (rinex_4.02.txt Table A33), UTC id strings, GLONASS a1, Galileo disturbance flags, LEAP SECONDS fields; RINEX 2 CORR TO SYSTEM TIME holds the reference date and a0 only, so T, the satellite or SBAS id and the UTC identifier go (T-W-S-U: rinex211.txt Table A10 l.1689, Table A15 l.1908)"
+  },
+  {
+   "kind": "nav",
+   "category": "header-record-not-representable:*",
+   "source": [
+    "4.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "3.05"
+   ],
+   "cite": "MERGED FILE, DOI, LICENSE OF USE, STATION INFORMATION, REC # / TYPE / VERS are 4.x nav records (rinex_4.02.txt Table A7)"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-epoch-precision",
+   "source": [
+    "2.00",
+    "2.11"
+   ],
+   "target": [
+    "3.00",
+    "4.02"
+   ],
+   "cite": "v2 epoch seconds F5.1, v3/v4 I2"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-duplicate-removed",
+   "when": "dedupe",
+   "cite": "PLAN §3.5 --dedupe"
+  },
+  {
+   "kind": "obs",
+   "category": "sys-record-not-representable:*",
+   "when": "system-gone",
+   "cite": "SYS / DCBS APPLIED and SYS / PCVS APPLIED name a system (rinex305.txt Table A2; rinex300.txt Table A1 p.29 allows G/R/E/S): one of a system the output does not hold (not in the target, or removed by --drop-unresolvable) has no room"
+  },
+  {
+   "kind": "obs",
+   "category": "antenna-phasecenter-code-not-representable:*",
+   "when": "code-not-in-target",
+   "cite": "ANTENNA: PHASECENTER names an observation code (rinex305.txt Table A2 p.53); a code the target version does not define (or of a system it lacks) has no record there"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-foreign-dropped:*",
+   "when": "source-ne-target",
+   "cite": "a SYS / SCALE FACTOR, SYS / PHASE SHIFT, GLONASS SLOT / FRQ # or GLONASS COD/PHS/BIS record in a version that does not define it (rinex211.txt Table A1 has none; rinex300.txt Table A1 no SYS / PHASE SHIFT or GLONASS records; rinex301.txt Table A1 no GLONASS COD/PHS/BIS) means nothing to that version's readers: not interpreted, so not written to another version"
+  },
+  {
+   "kind": "obs",
+   "category": "event-record-foreign-dropped:*",
+   "when": "source-ne-target",
+   "cite": "the same records inside an event (flag 4 'header information follows', rinex211.txt Table A2)"
+  },
+  {
+   "kind": "nav",
+   "category": "merge-header-record-dropped:*",
+   "when": "merge",
+   "cite": "--merge: a navigation file holds one DOI, one LEAP SECONDS and one PGM / RUN BY / DATE (rinex_4.02.txt Table A7 p.75-76; section 5.2.2: only observation files add PGM lines), so another input's different record has no room; merged files from several stations are not to include REC # / TYPE / VERS (Table A7 note 2). LICENSE OF USE and STATION INFORMATION are 'Line(s)' and are all kept"
+  },
+  {
+   "kind": "met",
+   "category": "met-type-not-representable:*",
+   "source": [
+    "2.11",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.10"
+   ],
+   "cite": "WD WS RI HI added in 2.11 (rinex211.txt §10.3)"
+  },
+  {
+   "kind": "met",
+   "category": "header-record-not-representable:SENSOR*",
+   "source": [
+    "2.11",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.10"
+   ],
+   "cite": "as above"
+  },
+  {
+   "kind": "met",
+   "category": "header-record-not-representable:DOI",
+   "when": "source-ne-target",
+   "target": [
+    "2.10",
+    "3.05"
+   ],
+   "cite": "defined only from 4.00 (rinex_4.02.txt Table A42); a 3.0x met file that already has it (some writers) carries it in a same-version conversion"
+  },
+  {
+   "kind": "met",
+   "category": "header-record-not-representable:LICENSE OF USE",
+   "when": "source-ne-target",
+   "target": [
+    "2.10",
+    "3.05"
+   ],
+   "cite": "defined only from 4.00 (rinex_4.02.txt Table A42); a 3.0x met file that already has it (some writers) carries it in a same-version conversion"
+  },
+  {
+   "kind": "met",
+   "category": "header-record-not-representable:STATION INFORMATION",
+   "when": "source-ne-target",
+   "target": [
+    "2.10",
+    "3.05"
+   ],
+   "cite": "defined only from 4.00 (rinex_4.02.txt Table A42); a 3.0x met file that already has it (some writers) carries it in a same-version conversion"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-message-not-representable:*",
+   "source": [
+    "4.02",
+    "4.02"
+   ],
+   "target": [
+    "4.00",
+    "4.01"
+   ],
+   "cite": "GLONASS L1OC/L3OC and NavIC L1NV messages, and LXOC/L1NV STO/EOP/ION types, exist only from 4.02 (rinex_4.02.txt §5.4.4, §5.4.8, Tables A16, A17, A31, A33, A34, A38, A39)"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-subtype-not-representable:*",
+   "source": [
+    "4.02",
+    "4.02"
+   ],
+   "target": [
+    "3.01",
+    "4.01"
+   ],
+   "cite": "record subtypes (e.g. QZSS ION WIDE/JAPN) exist only from 4.02 (rinex_4.02.txt Table 25 p.40, Table A35 note 3*); 4.00/4.01 record lines have no subtype field (rinex_4.00.txt Table A32 p.103), nor has the RINEX 3 IONOSPHERIC CORR record that holds QZSS Klobuchar values from 3.01 ('QZSA = QZS alpha0 - alpha3', rinex305.txt Table A5 l.3634); the record's values are kept"
+  },
+  {
+   "kind": "obs",
+   "category": "lli-bit2-meaning-differs",
+   "when": "lli-bit2-meaning",
+   "cite": "LLI bit 2: anti-spoofing in 2.x (rinex211.txt Table A2), undefined in 3.00 (rinex300.txt ~1970), BOC tracking of an MBOC signal from 3.01 (rinex301.txt ~2227)"
+  },
+  {
+   "kind": "obs",
+   "category": "flags-on-missing-value-dropped",
+   "target": [
+    "2.10",
+    "2.11"
+   ],
+   "cite": "Compact RINEX 1.0 cannot hold LLI/SSI on a blank RINEX 2 observation (rnx2crx.c; docs/HATANAKA.md); only with Hatanaka output"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-correction-extra:*",
+   "when": "source-ne-target-or-merge",
+   "target": [
+    "2.10",
+    "3.05"
+   ],
+   "cite": "a RINEX 2/3 header holds one value per correction type (rinex305.txt Table A5; rinex211.txt Table A3): further values of that type, from RINEX 4 records or merged inputs, have no place"
+  }
+ ],
+ "nav_systems": {
+  "_doc": "Systems with a navigation data record: 3.00/3.01 G E R S (rinex300.txt, rinex301.txt Tables A5-A11); + J C from 3.02 (rinex302.txt Tables A12, A13); + I from 3.03.",
+  "3.00": "GRES",
+  "3.01": "GRES",
+  "3.02": "GRESCJ",
+  "3.03": "GRESCJI",
+  "3.04": "GRESCJI",
+  "3.05": "GRESCJI",
+  "4.00": "GRESCJI",
+  "4.01": "GRESCJI",
+  "4.02": "GRESCJI"
+ }
+}

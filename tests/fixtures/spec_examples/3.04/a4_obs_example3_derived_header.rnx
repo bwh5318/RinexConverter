@@ -1,0 +1,49 @@
+     3.04           OBSERVATION DATA    M: MIXED            RINEX VERSION / TYPE
+GR25 V3.08                              20140513 072944 UTC PGM / RUN BY / DATE
+SNR is mapped to RINEX snr flag value [1-9]                 COMMENT
+LX:     < 12dBHz -> 1; 12-17dBHz -> 2; 18-23dBHz -> 3       COMMENT
+       24-29dBHz -> 4; 30-35dBHz -> 5; 36-41dBHz -> 6       COMMENT
+       42-47dBHz -> 7; 48-53dBHz -> 8; >= 54dBHz -> 9       COMMENT
+Tokio                                                       MARKER NAME
+TOKI                                                        MARKER NUMBER
+SU Japan - Leica Geosystems                                 OBSERVER / AGENCY
+1870023             LEICA GR25          3.08/6.401          REC # / TYPE / VERS
+                    LEIAS10         NONE                    ANT # / TYPE
+ -3956196.8609  3349495.1794  3703988.8347                  APPROX POSITION XYZ
+        0.0000        0.0000        0.0000                  ANTENNA: DELTA H/E/N
+G   16 C1C L1C D1C S1C C2S L2S D2S S2S C2W L2W D2W S2W C5Q  SYS / # / OBS TYPES
+       L5Q D5Q S5Q                                          SYS / # / OBS TYPES
+R   12 C1C L1C D1C S1C C2P L2P D2P S2P C2C L2C D2C S2C      SYS / # / OBS TYPES
+E   16 C1C L1C D1C S1C C5Q L5Q D5Q S5Q C7Q L7Q D7Q S7Q C8Q  SYS / # / OBS TYPES
+       L8Q D8Q S8Q                                          SYS / # / OBS TYPES
+C    8 C2I L2I D2I S2I C7I L7I D7I S7I                      SYS / # / OBS TYPES
+J   12 C1C L1C D1C S1C C2S L2S D2S S2S C5Q L5Q D5Q S5Q      SYS / # / OBS TYPES
+S    4 C1C L1C D1C S1C                                      SYS / # / OBS TYPES
+DBHZ                                                        SIGNAL STRENGTH UNIT
+     1.000                                                  INTERVAL
+  2014    05    13    07    30    0.0000000     GPS         TIME OF FIRST OBS
+  2014    05    13    07    34   59.0000000     GPS         TIME OF LAST OBS
+     0                                                      RCV CLOCK OFFS APPL
+G L1C                                                       SYS / PHASE SHIFT
+G L2S -0.25000                                              SYS / PHASE SHIFT
+G L2W                                                       SYS / PHASE SHIFT
+G L5Q -0.25000                                              SYS / PHASE SHIFT
+R L1C                                                       SYS / PHASE SHIFT
+R L2P  0.25000                                              SYS / PHASE SHIFT
+R L2C                                                       SYS / PHASE SHIFT
+E L1C +0.50000                                              SYS / PHASE SHIFT
+E L5Q -0.25000                                              SYS / PHASE SHIFT
+E L7Q -0.25000                                              SYS / PHASE SHIFT
+E L8Q -0.25000                                              SYS / PHASE SHIFT
+C L2I                                                       SYS / PHASE SHIFT
+C L7I                                                       SYS / PHASE SHIFT
+J L1C                                                       SYS / PHASE SHIFT
+J L2S                                                       SYS / PHASE SHIFT
+J L5Q -0.25000                                              SYS / PHASE SHIFT
+S L1C                                                       SYS / PHASE SHIFT
+ 24 R01  1 R02 -4 R03  5 R04  6 R05  1 R06 -4 R07  5 R08  6 GLONASS SLOT / FRQ #
+    R09 -2 R10 -7 R11  0 R12 -1 R13 -2 R14 -7 R15  0 R16 -1 GLONASS SLOT / FRQ #
+    R17  4 R18 -3 R19  3 R20  2 R21  4 R22 -3 R23  3 R24  2 GLONASS SLOT / FRQ #
+ C1C    0.000 C1P    0.000 C2C    0.000 C2P    0.000        GLONASS COD/PHS/BIS
+    16        1694     7                                    LEAP SECONDS
+                                                            END OF HEADER
