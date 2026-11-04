@@ -313,7 +313,7 @@
     "3.05"
    ],
    "when": "source-ne-target",
-   "cite": "an entry whose observation code the target cannot hold"
+   "cite": "an entry whose observation code the target cannot hold; or a 3.01 entry with a code and no value, which records no correction ('none, or not known': rinex301.txt section 9.1 p.24-25) but from 3.02 would read 'only reference signals', i.e. aligned (rinex302.txt section 9.1 p.41): written as the target's unknown form instead (PLAN section 3.3 rule 1); and the other way, a 3.02-3.05 code-only entry ('only reference signals') going to 3.01, which has no such form: written as 3.01's blank form, the system alone ('no observation pairs affected by phase shifts, or not known', rinex301.txt p.25)"
   },
   {
    "kind": "obs",
@@ -353,6 +353,50 @@
     "2.11"
    ],
    "cite": "F12.9 range"
+  },
+  {
+   "kind": "obs",
+   "category": "clock-overflow",
+   "source": [
+    "2.00",
+    "4.02"
+   ],
+   "target": [
+    "3.00",
+    "4.02"
+   ],
+   "cite": "F15.12 range (rinex305.txt Table A3 p.59, rinex_4.02.txt Table A3: -9.999999999999 to 99.999999999999): a receiver clock offset written wider than its field (readable, validator warning VAL.OBS.EPOCH.FORMAT; e.g. ' 123.4567890' in RINEX 2's F12.9 columns, rinex211.txt Table A2) has no F15.12 form"
+  },
+  {
+   "kind": "obs",
+   "category": "data-text-dropped",
+   "cite": "--lenient only (PLAN §1 clause 9: data-level damage is refused by default; --lenient repairs what it can and reports each repair): text in columns no field of its record covers has no observation type or meaning (rinex211.txt Table A2: 80-column records, 5 fields of F14.3,I1,I1 per line, event lines without a satellite list; rinex305.txt Table A3 p.59 and rinex_4.02.txt Table A3: one field per declared type, reserved 6X), so it is dropped, one count per line"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-unalign-precision:*",
+   "source": [
+    "3.01",
+    "3.05"
+   ],
+   "target": [
+    "3.00",
+    "3.00"
+   ],
+   "cite": "--align-phases to 3.00 (PLAN §3.3 rule 3): a recorded correction F8.5 has up to 5 decimals (rinex305.txt Table A2 p.57), an observation F14.3 three (rinex300.txt Table A2 p.30): the phase less the correction is rounded half-even to 3 decimals"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-align-precision:*",
+   "source": [
+    "2.00",
+    "3.05"
+   ],
+   "target": [
+    "3.02",
+    "3.05"
+   ],
+   "cite": "--align-phases (PLAN §3.3 rule 2): an observation F14.3 holds three decimals (rinex305.txt Table A3 p.59); a phase written with more digits than that, plus a table correction, is rounded half-even to 3 decimals"
   },
   {
    "kind": "obs",
@@ -415,7 +459,7 @@
    "kind": "nav",
    "category": "nav-correction-not-representable:*",
    "when": "nav-corr-not-in-target",
-   "cite": "RINEX 2 holds only GPS ION/DELTA-UTC, GLONASS and SBAS time corrections; RINEX 3 one header value per type; EOP and BDGIM have no RINEX 3 form; a 4.00/4.01 QZSS CNVX ION record has no 4.02 form, which needs its area WIDE/JAPN (rinex_4.02.txt Table 25 p.40); checked per type against the target's header records / RINEX 4 records"
+   "cite": "RINEX 2 holds only GPS ION/DELTA-UTC, GLONASS and SBAS time corrections; RINEX 3 one header value per type; EOP and BDGIM have no RINEX 3 form; a 4.00/4.01 QZSS CNVX ION record whose Region code is neither 0, blank nor 1 (rinex_4.00.txt Table A32 p.104) names no area for the WIDE/JAPN 4.02 requires (rinex_4.02.txt Table 25 p.40); checked per type against the target's header records / RINEX 4 records"
   },
   {
    "kind": "nav",
@@ -591,6 +635,86 @@
     "3.05"
    ],
    "cite": "a RINEX 2/3 header holds one value per correction type (rinex305.txt Table A5; rinex211.txt Table A3): further values of that type, from RINEX 4 records or merged inputs, have no place"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-field-not-representable:*",
+   "source": [
+    "4.02",
+    "4.02"
+   ],
+   "target": [
+    "4.00",
+    "4.01"
+   ],
+   "cite": "the GPS/QZSS CNAV and CNAV-2 'Integer flags encoded as decimal value (optional; blank if not provided)', a third field of the last record line from 4.02 (rinex_4.02.txt Tables A10 p.81, A11 p.83, A20 p.96, A21 p.98: 4X,3E19.12); 4.00/4.01 define two fields there (rinex_4.01.txt Tables A10 l.4419, A11 l.4545 p.79-81: 4X,2E19.12)"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-field-not-representable:S:SBAS:IODN",
+   "source": [
+    "2.11",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "2.10"
+   ],
+   "cite": "the GEO BROADCAST ORBIT - 3 field 4 is the IODN from 2.11 (rinex211.txt Table A16 l.1976, l.932-935; rinex305.txt Table A16 p.81; rinex_4.02.txt Table A28 p.108) and a spare in 2.10 (rinex210.txt Table A16 l.1671): a spare holds no defined content, so the IODN has no 2.10 field"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-field-not-representable:J:LNAV:L2P-flag",
+   "source": [
+    "3.03",
+    "4.02"
+   ],
+   "target": [
+    "3.02",
+    "3.02"
+   ],
+   "cite": "the QZSS BROADCAST ORBIT - 5 field 4 is the L2 P data flag from 3.03 (rinex303.txt Table A12 p.80; rinex305.txt Table A12 p.77-78; rinex_4.02.txt Table A19 p.93) and a Spare in 3.02 (rinex302.txt Table A12 p.71-72)"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-spare-value-dropped:*",
+   "source": [
+    "2.00",
+    "4.02"
+   ],
+   "target": [
+    "2.10",
+    "4.02"
+   ],
+   "cite": "a non-zero value in a spare field, or in a field no version defines, that the target's line does not hold: RINEX 2/3 lines have four fields, spares included (rinex211.txt Table A4 BROADCAST ORBIT 7 't_tm, fit interval, spare, spare'; rinex305.txt Tables A6-A18), RINEX 4 lines only the defined ones (rinex_4.02.txt Table A9 p.79 LNAV orbit 7 '4X,2E19.12', A13 p.85 Galileo orbit 5 '4X,3E19.12' and orbit 7 '4X,1E19.12', A23 p.100, A30 p.111). Spare fields hold no defined content and are to be left blank (rinex305.txt section 6.4 p.42, rinex_4.02.txt section 6.4 p.48)"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-ion-area-not-representable:*",
+   "when": "source-ne-target",
+   "source": [
+    "4.00",
+    "4.01"
+   ],
+   "target": [
+    "2.10",
+    "4.02"
+   ],
+   "cite": "the 4.00/4.01 Klobuchar 'Region code: 0 or blank (wide area parameters), 1 (QZSS only - Japan area coefficients)' (rinex_4.00.txt Table A32 l.5908 p.104, rinex_4.01.txt l.6190 p.108): 4.02 has the area only as the subtype of QZSS CNVX records, 'for the other types the subtype shall be left blank' (rinex_4.02.txt Table 25 p.40, Table A35 note 3* p.117), and RINEX 2/3 headers have no area field (rinex211.txt Table A3; rinex305.txt Table A5 p.65 'QZSA = QZS alpha0 - alpha3'): a QZSS LNAV set's area, or a code another system should not have, goes"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-sto-system-not-representable:*",
+   "when": "source-ne-target",
+   "source": [
+    "2.10",
+    "4.02"
+   ],
+   "target": [
+    "4.00",
+    "4.01"
+   ],
+   "cite": "STO records name the satellite system G,R,E,C,J,I in 4.00/4.01 (rinex_4.00.txt Table A30 p.102, rinex_4.01.txt l.6062 p.106); S from 4.02 (rinex_4.02.txt Table A33 p.115): an SBAS time offset (SBUT) has no 4.00/4.01 STO record"
   }
  ],
  "nav_systems": {

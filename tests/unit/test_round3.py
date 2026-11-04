@@ -124,7 +124,10 @@ class LossCountsPerColumn(unittest.TestCase):
         for t in ("3.05", "3.03", "4.02"):
             with self.subTest(target=t):
                 outs, rep = convert(self.DUP, t)
-                self.assertEqual(rep["losses"], {})
+                # (to RINEX 4 the 'G L1C' code-only SYS / PHASE SHIFT, 'only reference signals',
+                # is dropped as deprecated and claimed, as a zero form is: round 32)
+                self.assertEqual(rep["losses"], {} if t < "4" else
+                                 {"phase-shift-record-deprecated": {"count": 1, "detail": {}}})
                 self.assertIn(hdr("G    3 C1C L1C C1C", "SYS / # / OBS TYPES"), head_lines(outs[0].data))
                 self.assertIn("OBS.DUPLICATE-CODE-KEPT", [w["rule"] for w in rep["warnings"]])
                 self.assertEqual(compare_obs(self.DUP, outs[0].data, rep), [])
@@ -201,14 +204,27 @@ class DeprecatedEventRecords(unittest.TestCase):
 
 class QzssIonArea(unittest.TestCase):
     """BRD400DLR: QZSS CNVX ION records need WIDE or JAPN from 4.02 (rinex_4.02.txt Table 25
-    p.40, Table A35 note 3*); 4.00/4.01 have no subtype field (rinex_4.00.txt Table A32)."""
+    p.40, Table A35 note 3*). 4.00/4.01 have no subtype field, but ION MESSAGE LINE - 2 holds
+    a 'Region code: 0 or blank (wide area parameters), 1 (QZSS only - Japan area
+    coefficients)' (rinex_4.00.txt Table A32 l.5908 p.104; rinex_4.01.txt l.6190 p.108):
+    round 32, the area was read as unknown before."""
 
     J_CNVX = ["> ION J01 CNVX", "    2026 10 30 00 00 00" + d19(1e-8, "E") * 3,
               "    " + d19(1.0, "E") * 4, "    " + d19(1.0, "E")]
 
     def test_400_to_402_drops_area_unknown(self):
+        # a blank Region code is wide area: CNVX WIDE, nothing lost (round 32; it was dropped)
         src = payload(nav_v4("4.00", "D") + [x.replace("E", "D") if x[0] != ">" else x for x in self.J_CNVX])
         self.assertEqual(V.errors(V.validate(src)), [])
+        outs, rep = convert(src, "4.02")
+        self.assertNotIn("nav-correction-not-representable:ION:CNVX-area-unknown:J", rep["losses"])
+        self.assertIn(b"\n> ION J01 CNVX WIDE\n", outs[0].data)
+        self.assertEqual(rep["rules"]["NAV.ION.REGION-TO-SUBTYPE"]["count"], 1)
+        self.assertEqual(allowed_check(rep), [])
+        self.assertEqual(compare_nav(src, [o.data for o in outs], rep), [])
+        # a code that names no area (neither 0, blank nor 1) is still dropped and claimed
+        bad = [*self.J_CNVX[:3], "    " + d19(1.0, "E") + d19(2.0, "E")]
+        src = payload(nav_v4("4.00", "D") + [x.replace("E", "D") if x[0] != ">" else x for x in bad])
         outs, rep = convert(src, "4.02")
         self.assertEqual(rep["losses"]["nav-correction-not-representable:ION:CNVX-area-unknown:J"]["count"], 1)
         self.assertNotIn(b"> ION J01 CNVX", outs[0].data)
@@ -216,12 +232,16 @@ class QzssIonArea(unittest.TestCase):
         self.assertEqual(compare_nav(src, [o.data for o in outs], rep), [])
 
     def test_402_to_401_strips_subtype(self):
+        # the subtype goes, its area stays as the Region code: WIDE is 0 (round 32: the subtype
+        # was claimed lost)
         src = payload(nav_v4("4.02"))
         outs, rep = convert(src, "4.01")
         out = outs[0].data.decode()
         self.assertIn("\n> ION J01 CNVX\n", out)
         self.assertNotIn("WIDE", out)
-        self.assertEqual(rep["losses"]["nav-subtype-not-representable:ION:J:CNVX"]["count"], 1)
+        self.assertNotIn("nav-subtype-not-representable:ION:J:CNVX", rep["losses"])
+        k = out.split("\n").index("> ION J01 CNVX")
+        self.assertEqual(out.split("\n")[k + 3][23:42], " 0.000000000000E+00")
         self.assertEqual(V.errors(V.validate(outs[0].data)), [])
         self.assertEqual([f.rule for f in V.validate(outs[0].data) if "subtype" in f.message], [])
         self.assertEqual(allowed_check(rep), [])

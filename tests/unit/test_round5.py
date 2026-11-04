@@ -127,9 +127,25 @@ class NavSubtypes(unittest.TestCase):
         self.assertTrue(compare_nav(src, [o.data for o in outs], bare))
 
     def test_subtype_loss_claimed_below_402(self):
+        # 3.05 has no area field (rinex305.txt Table A5 p.65): the subtype is claimed. 4.01
+        # holds the area as the Klobuchar Region code ('0 or blank (wide area parameters), 1
+        # (QZSS only - Japan area coefficients)', rinex_4.01.txt l.6190 p.108): WIDE is written
+        # 0, nothing lost (round 32; it was claimed lost)
         for t in ("4.01", "3.05"):
             with self.subTest(target=t):
                 outs, rep = convert(self.SRC, t)
+                if t == "4.01":
+                    self.assertNotIn("nav-subtype-not-representable:ION:J:CNVX", rep["losses"])
+                    self.assertEqual(rep["rules"]["NAV.ION.SUBTYPE-TO-REGION"]["count"], 1)
+                    lines = outs[0].data.decode().split("\n")
+                    k = next(i for i, l in enumerate(lines) if l.startswith("> ION J01 CNVX"))
+                    self.assertEqual(lines[k].rstrip(), "> ION J01 CNVX")
+                    self.assertEqual(lines[k + 3][23:42], " 0.000000000000E+00")
+                    self.assertEqual(compare_nav(self.SRC, [o.data for o in outs], rep), [])
+                    bad = outs[0].data.replace(lines[k + 3].encode(), lines[k + 3][:23].encode()
+                                               + b" 1.000000000000E+00")
+                    self.assertTrue(compare_nav(self.SRC, [bad], rep))
+                    continue
                 self.assertEqual(rep["losses"]["nav-subtype-not-representable:ION:J:CNVX"]["count"], 1)
                 self.assertEqual(allowed_check(rep), [])
                 self.assertEqual(compare_nav(self.SRC, [o.data for o in outs], rep), [])

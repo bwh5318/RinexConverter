@@ -314,6 +314,18 @@ Run with `tools/check_hatanaka.py`; digests in `tests/oracle/crx2rnx_sha256.json
 * **CRINEX 3.1:** no corpus file uses it. A RINEX 4.02 fixture with picosecond epochs
   (with and without clock, unchanged values, an event, a slip) is encoded by us as
   CRINEX 3.1 and CRX2RNX returns it exactly; archived with its digests.
+* **Encoder vs RNX2CRX 4.2.0 (2026-11-01, `tools/check_hatanaka.py rnx2crx`; digests in
+  `tests/oracle/rnx2crx_sha256.json`):** on every corpus obs file (299 decoded CRX files and
+  6 plain ones) RNX2CRX's output and ours are byte-identical apart from line 2, and our
+  decoder reads RNX2CRX's output back, except ebre1800.10d and sulp1800.10d, whose version
+  field reads `2.1`, which RNX2CRX refuses (the leniency above). RNX2CRX's own CRINEX 3.1
+  encoding of the picosecond fixture is archived in full: identical to ours apart from
+  line 2, and our decoder gives the fixture back. Live, the two leniencies above are
+  confirmed (a missing final LF is "truncated" to RNX2CRX; `-0000000.123` loses its sign),
+  every input our encoder refuses is one that RNX2CRX refuses or that CRX2RNX does not give
+  back, and a 3,000-case differential fuzz found no other difference (the inputs we refuse
+  that the official pair carries all fail our validator: `&` or bytes 0x80-0xFF in epoch
+  lines or fields).
 * **Fuzzing:** seeded byte flips, truncation, line deletion/duplication/swaps (including
   bytes 0x80–0xFF in digit positions) raise only `CorruptError`. Against the exe,
   1500 mutated CRX files: every file we decode, CRX2RNX decodes to the same bytes; of the

@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,37 @@ def run_crx2rnx(exe, crx):
     if os.name == "nt":
         out = out.replace(b"\r\n", b"\n")
     return r.returncode, out, r.stderr.decode("latin-1")
+
+
+def find_rnx2crx():
+    """Path of the RNX2CRX 4.2.0 oracle (tools/oracles/ORACLES.md), or None (tests using it
+    are skipped)."""
+    for p in (os.environ.get("RINEX_ORACLE_RNX2CRX", ""),
+              os.path.join(ROOT, "tools", "oracles", "rnxcmp", "RNX2CRX.exe")):
+        if p and os.path.isfile(p):
+            return os.path.abspath(p)
+    return None
+
+
+def run_rnx2crx(exe, rnx):
+    """(exit code, stdout with CRLF -> LF, stderr) of RNX2CRX reading stdin, writing stdout."""
+    with tempfile.TemporaryDirectory() as d:
+        inp = os.path.join(d, "in.rnx")
+        with open(inp, "wb") as f:
+            f.write(rnx)
+        with open(inp, "rb") as fi:
+            r = subprocess.run([exe], stdin=fi, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=120)
+    out = r.stdout
+    if os.name == "nt":
+        out = out.replace(b"\r\n", b"\n")
+    return r.returncode, out, r.stderr.decode("latin-1")
+
+
+def body(crx):
+    """A CRX file without line 2, CRINEX PROG / DATE (program name and run date)."""
+    a = crx.split(b"\n", 2)
+    return a[0] + b"\n" + (a[2] if len(a) > 2 else b"")
 
 
 def load_archive():
@@ -809,6 +841,139 @@ class TestOracleLive(unittest.TestCase):
                 code, out, err = run_crx2rnx(self.exe, rnx_to_crx(rnx))
                 self.assertEqual(code, 0, err)
                 self.assertTrue(out == rnx)
+
+
+RNX2CRX_ARCHIVE = os.path.join(ROOT, "tests", "oracle", "rnx2crx_sha256.json")
+
+
+class TestRnx2crxArchive(unittest.TestCase):
+    """RNX2CRX 4.2.0's results, archived by `tools/check_hatanaka.py rnx2crx` (PLAN §1.5c),
+    checked without the exe."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.isfile(RNX2CRX_ARCHIVE):
+            raise unittest.SkipTest("RNX2CRX results not archived yet")
+        with open(RNX2CRX_ARCHIVE, "rb") as f:
+            cls.arch = json.loads(f.read().decode("utf-8"))
+
+    def test_crinex31_made_by_rnx2crx(self):
+        """PLAN M1: the corpus has no CRINEX 3.1 file, so RNX2CRX 4.2.0's own encoding of the
+        RINEX 4.02 picosecond fixture is kept in full: our decoder gives the fixture back, and
+        our encoder writes the same bytes apart from line 2."""
+        fx = self.arch["fixtures"]["rinex402_picosec"]
+        crx = fx["crx"].encode("latin-1")
+        rnx = make_rinex402_fixture()
+        self.assertEqual((fx["exit_code"], fx["stderr"], fx["lone_cr"]), (0, "", 0))
+        self.assertEqual(sha(rnx), fx["rinex_sha256"])
+        self.assertEqual(sha(crx), fx["crx_sha256_lf"])
+        self.assertEqual(crx[:3], b"3.1")
+        self.assertEqual(crx_to_rnx(crx), rnx)
+        self.assertEqual(body(rnx_to_crx(rnx, date=DATE)), body(crx))
+
+    def test_every_corpus_obs_file(self):
+        """RNX2CRX(r) and our rnx_to_crx(r) agree byte for byte apart from line 2, and our
+        decoder reads RNX2CRX's output back, for every corpus obs file (CRX files decoded,
+        plain files as they are)."""
+        files = self.arch["files"]
+        with open(MANIFEST, "rb") as f:
+            obs = [e for e in json.loads(f.read().decode("utf-8"))["files"] if e["kind"] == "obs"]
+        self.assertEqual(sorted(files), sorted(e["path"] for e in obs))
+        bad = {p: (r["exit_code"], r["ours"], r["decodes_back"]) for p, r in files.items()
+               if not (r["exit_code"] == 0 and r["lone_cr"] == 0 and r["ours"] == "identical"
+                       and r["decodes_back"])}
+        # RNX2CRX 4.2.0 refuses a version field written '2.1' (docs/HATANAKA.md section 9),
+        # which our encoder reads as 2.10: ebre1800.10d and sulp1800.10d
+        v21 = {e["path"] for e in obs if e["version_str"] == "2.1"}
+        self.assertEqual(len(v21), 2)
+        self.assertEqual(set(bad), v21)
+        for p in v21:
+            self.assertEqual(files[p]["exit_code"], 1)
+            self.assertIn("2.1            OBSERVATION DATA", files[p]["stderr"])
+
+    def test_corpus_sample_offline(self):
+        """With the corpus but without the exe: our encoder's output, line 2 aside, has the
+        digest RNX2CRX's had."""
+        if not os.path.isdir(CORPUS):
+            self.skipTest("data/corpus (gitignored) is not here")
+        for e in _corpus_entries()[:3]:
+            with self.subTest(e["path"]):
+                rnx = crx_to_rnx(_load_corpus(e))
+                a = self.arch["files"][e["path"]]
+                self.assertEqual(sha(rnx), a["rinex_sha256"])
+                self.assertEqual(sha(body(rnx_to_crx(rnx))), a["sha256_body"])
+
+
+class TestRnx2crxLive(unittest.TestCase):
+    """RNX2CRX.exe itself (with CRX2RNX.exe for the round trips); skipped when missing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.exe = find_rnx2crx()
+        if not cls.exe:
+            raise unittest.SkipTest("RNX2CRX.exe not available")
+        cls.dec = find_crx2rnx()
+
+    def test_handmade_same_bytes_as_ours(self):
+        for name, (_crx, rnx) in HANDMADE.items():
+            with self.subTest(name):
+                code, out, err = run_rnx2crx(self.exe, rnx)
+                self.assertEqual((code, err), (0, ""))
+                self.assertEqual(body(out), body(rnx_to_crx(rnx, date=DATE)))
+                self.assertEqual(crx_to_rnx(out), rnx)
+
+    def test_our_refusals(self):
+        """Every input our encoder refuses (TestEncodeErrors) is one the official pair cannot
+        carry either: RNX2CRX stops with an error or warning, or CRX2RNX does not give the
+        input back (docs/HATANAKA.md section 9)."""
+        if not self.dec:
+            self.skipTest("CRX2RNX.exe not available")
+        for name, data, rule in TestEncodeErrors.cases:
+            with self.subTest(name, rule=rule):
+                code, out, err = run_rnx2crx(self.exe, data)
+                if code != 0:
+                    continue
+                c2, back, err2 = run_crx2rnx(self.dec, out)
+                self.assertFalse(c2 == 0 and back == data,
+                                 f"RNX2CRX and CRX2RNX carry {name!r}, which we refuse ({rule})")
+
+    def test_differential_fuzz(self):
+        """Whatever our encoder accepts, RNX2CRX encodes to the same bytes (line 2 aside),
+        except where docs/HATANAKA.md section 9 says the encoder is more lenient: a file
+        without a final LF, which RNX2CRX takes for truncated."""
+        rnd = random.Random(4242)
+        fuzz = TestFuzz()
+        fuzz.POOL = b" 0123456789&->G\n.E\xb2\xb9\xff"
+        sources = [r for _, r in HANDMADE.values()] + [make_rinex402_fixture()]
+        accepted = lenient = 0
+        for k in range(120):
+            data = fuzz.mutate(rnd, rnd.choice(sources))
+            try:
+                ours = rnx_to_crx(data, date=DATE)
+            except CorruptError:
+                continue
+            accepted += 1
+            code, out, err = run_rnx2crx(self.exe, data)
+            if code != 0 and not data.endswith(b"\n"):
+                lenient += 1
+                self.assertEqual(crx_to_rnx(ours), crx_to_rnx(rnx_to_crx(data + b"\n")))
+                continue
+            if code == 0 and body(out) != body(ours) and re.search(rb" -0+\d*\.\d{3}", data):
+                lenient += 1          # RNX2CRX loses the sign there (test_minus_with_leading_zeros)
+                continue
+            self.assertEqual((code, body(out)), (0, body(ours)), f"case {k}: {err}\n{data!r}")
+        self.assertGreater(accepted - lenient, 5)
+
+    def test_minus_with_leading_zeros(self):
+        """docs/HATANAKA.md section 9: RNX2CRX loses the sign of `-0000000.123` (it encodes
+        +0.123); our encoder keeps the true value (found by a 3,000-case differential fuzz,
+        2026-11-01)."""
+        rnx = RNX10.replace(b"  20000000.123 ", b"  -0000000.123 ")
+        self.assertNotEqual(rnx, RNX10)
+        code, out, err = run_rnx2crx(self.exe, rnx)
+        self.assertEqual(code, 0, err)
+        self.assertIn(b"  .123 ", crx_to_rnx(out))          # the sign is gone
+        self.assertIn(b" -.123 ", crx_to_rnx(rnx_to_crx(rnx)))   # ours keeps it
 
 
 if __name__ == "__main__":

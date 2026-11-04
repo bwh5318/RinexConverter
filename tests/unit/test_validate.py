@@ -227,7 +227,9 @@ def nav_v2_record(prn, t, nlines, letter="D"):
     out = [f"{prn:2d} {y % 100:02d} {mo:2d} {d:2d} {h:2d} {mi:2d}{s:5.1f}"
            + "".join(d19(1e-4 * (j + 1), letter) for j in range(3))]
     for i in range(1, nlines):
-        out.append("   " + "".join(d19(1.5 * i + j, letter) for j in range(4)))
+        # GPS BROADCAST ORBIT 7 fields 3-4 are spares (rinex211.txt Table A4 l.1411-1412): 0
+        out.append("   " + "".join(d19(0.0 if (nlines == 8 and i == 7 and j >= 2) else 1.5 * i + j, letter)
+                                   for j in range(4)))
     return out
 
 
@@ -252,13 +254,24 @@ def nav_v2_glonass():
     return h + nav_v2_record(1, (2026, 10, 30, 0, 15, 0.0), 4)
 
 
-def nav_v3_record(sat, t, nlines, letter="E"):
-    """A1,I2.2,1X,I4,5(1X,I2.2),3D19.12 then 4X,4D19.12 lines."""
+def nav_v3_record(sat, t, nlines, letter="E", last=4):
+    """A1,I2.2,1X,I4,5(1X,I2.2),3D19.12 then 4X,4D19.12 lines (`last` fields on the last one:
+    RINEX 4 LNAV and BDS D1/D2 orbit 7 define two, rinex_4.02.txt Tables A9 p.79, A23 p.100).
+    A GLONASS record's message frame time is Toc in seconds of the UTC week, as RINEX 3/4
+    define it (rinex305.txt Table A10 p.74; round 32: 6e-5 on a Friday is the day basis)."""
+    import datetime
     y, mo, d, h, mi, s = t
+    vals = [2e-5 * (j + 1) for j in range(3)]
+    if sat[0] == "R":
+        vals[2] = ((datetime.date(y, mo, d).weekday() + 1) % 7) * 86400 + h * 3600 + mi * 60 + s
     out = [f"{sat} {y:4d} {mo:02d} {d:02d} {h:02d} {mi:02d} {s:02d}"
-           + "".join(d19(2e-5 * (j + 1), letter) for j in range(3))]
+           + "".join(d19(v, letter) for v in vals)]
+    # spare fields hold 0 (rinex305.txt Tables A6, A8, A12, A14, A18; section 6.4 p.42)
+    spare = {"G": {7: (2, 3)}, "J": {7: (2, 3)}, "E": {5: (3,), 7: (1, 2, 3)},
+             "C": {5: (1, 3), 7: (2, 3)}, "I": {5: (1, 3), 6: (3,), 7: (1, 2, 3)}}.get(sat[0], {})
     for i in range(1, nlines):
-        out.append("    " + "".join(d19(0.5 * i - j, letter) for j in range(4)))
+        out.append("    " + "".join(d19(0.0 if j in spare.get(i, ()) else 0.5 * i - j, letter)
+                                    for j in range(4 if i < nlines - 1 else last)))
     return out
 
 
@@ -285,9 +298,13 @@ def nav_v4(version="4.02", letter="E"):
          hdr("    18", "LEAP SECONDS"),
          hdr("", "END OF HEADER")]
     num = lambda *v: "".join(d19(x, letter) for x in v)
-    b = ["> EPH G01 LNAV"] + nav_v3_record("G01", (2026, 10, 30, 0, 0, 0), 8, letter)
+    b = ["> EPH G01 LNAV"] + nav_v3_record("G01", (2026, 10, 30, 0, 0, 0), 8, letter, last=2)
     b += ["> EPH R01 FDMA"] + nav_v3_record("R01", (2026, 10, 30, 0, 15, 0), 5, letter)
-    b += ["> EPH C05 D2"] + nav_v3_record("C05", (2026, 10, 30, 0, 0, 0), 8, letter)
+    c05 = nav_v3_record("C05", (2026, 10, 30, 0, 0, 0), 8, letter, last=2)
+    # BROADCAST ORBIT 5 'IDOT, Spare, BDT Week #, Spare' (rinex_4.02.txt Table A23 p.100):
+    # spare fields are to be left blank (section 6.4 p.48)
+    c05[5] = c05[5][:23] + " " * 19 + c05[5][42:61]
+    b += ["> EPH C05 D2"] + c05
     # STO: 4X,I4,5(1X,I2.2),1X,A18,1X,A18,1X,A18 then 4X,4D19.12 (Table A33)
     b += ["> STO G01 LNAV",
           f"    {stamp} " + "GPUT".ljust(18) + " " + " " * 18 + " " + "UTC(USNO)".ljust(18),
@@ -1139,6 +1156,10 @@ KNOWN_VIOLATIONS = {
     "met/v3.05/BAUT00DEU_R_20262740000_01D_10S_MM.rnx.gz": {
         "VAL.HDR.MANDATORY": "no PGM / RUN BY / DATE; line 2 is a gfzrnx COMMENT (rinex305.txt "
                              "Table A20 p.86)"},
+    "nav/v4.02/ES1300DEU_R_20262740000_01D_MN.rnx.gz": {
+        "VAL.NAV.FIELDS": "the 4.01 Region code (0.0) after Beta3 on ION MESSAGE LINE - 2 of 15 GPS LNAV / "
+                          "BDS D1D2 records; 4.02 defines Beta3 only there, 4X,E19.12 (rinex_4.02.txt "
+                          "Table A35 p.117; 4.00/4.01: 4X,2E19.12, rinex_4.01.txt l.6189 p.108)"},
     "nav/v3.02/BOR100POL_R_20262740000_01D_CN.rnx.gz": {
         "VAL.HDR.NUMBER": "TIME SYSTEM CORR values 3 columns right of A4,1X,D17.10,D16.9,I7,I5 "
                           "(rinex302.txt Table A5 p.62-63)",
@@ -1187,7 +1208,8 @@ class CorpusSmoke(unittest.TestCase):
                 f = self.run_file(p)
                 if f is None:
                     continue
-                bad = [x for x in errors(f) if not x.repairable]
+                # (a known violation is asserted exactly by test_known_violations_are_reported)
+                bad = [x for x in errors(f) if not x.repairable and x.rule not in KNOWN_VIOLATIONS.get(rel, {})]
                 repaired += [f"{rel}: {x.rule}" for x in errors(f) if x.repairable]
                 with self.subTest(rel):
                     self.assertEqual(bad, [], rel)

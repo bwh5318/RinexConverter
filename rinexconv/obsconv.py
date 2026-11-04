@@ -11,16 +11,28 @@ re-rounded except when a scale factor has to be applied for RINEX 2.
 """
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 
-from rinexcore.errors import CorruptError, MissingInformationError, NotRepresentableError
+from rinexcore.errors import CorruptError, InvocationError, MissingInformationError, NotRepresentableError
 from rinexcore.header import HeaderRecord, fmt_f
 from rinexcore.obs import (_ZERO_CHARS, BLANK, FIELD, Epoch, ObsFile, ObsTypes, is_missing_value,
                            parse_v2_types, parse_v3_types)
 
 BLANK14 = " " * 14
 _Q3 = Decimal("0.001")
+_NUMBER = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)")
+
+
+def _num(text):
+    """A header number written in plain digits (Fortran F/I fields). 'Infinity', 'NaN', 'sNaN'
+    and exponents are no such field: ArithmeticError, as for any unreadable number (Astra
+    round 39: 'sNaN' in SYS / PHASE SHIFT raised InvalidOperation later)."""
+    t = text.strip()
+    if not _NUMBER.fullmatch(t):
+        raise InvalidOperation(f"not a number: {t!r}")
+    return Decimal(t)
 
 from rinexcore.spec import obsheader
 
@@ -111,7 +123,8 @@ class ObsOptions:
     glo_fcn_source: str = None
     drop_unresolvable: bool = False
     assume_phase_aligned: bool = False
-    keep_v2_nonstandard: bool = False                 # write C/J/I into RINEX 2.11 (flagged)
+    align_phases: bool = False                        # PLAN 3.3 rules 2/3 (engine.check_options)
+    keep_v2_nonstandard: bool = False                # write C/J/I into RINEX 2.11 (flagged)
     keep_lli_bit2: bool = False                       # carry LLI bit 2 even where it changes meaning
     approx_position: tuple = None                     # user X Y Z (m) when the target needs one
     approx_position_zero: bool = False                # else teqc's 0 0 0 placeholder (reported)
@@ -210,7 +223,7 @@ class _ObsConverter:
                 if ph:
                     phase_seq.append(("phase", ph, ep.lineno))
                     last_sid = None
-                if self.slayout == "v3" and ep.flag in (3, 4) and any(
+                if self.slayout == "v3" and 2 <= ep.flag <= 5 and any(
                         r.label == "SYS / SCALE FACTOR" for r in ep.records):
                     scale = merge_scale(scale, parse_scale_factors(ep.records))   # as convert_epochs
                 continue
@@ -381,6 +394,8 @@ class _ObsConverter:
 
     def _rank(self, s, code):
         if len(code) == 3:
+            if s == "C" and self.tlayout == "v2" and codemap.bds_is_b1i(code, self.src.version):
+                code = code[0] + "2" + code[2]          # B1I in any version's band (v3_to_v2)
             return codemap.collapse_rank(s, code)
         return 0
 
@@ -440,7 +455,7 @@ class _ObsConverter:
             self.r.rule(f"OBS.V2V3.CODEMAP.{s}.{c}")
             return g
         if self.slayout == "v3" and self.tlayout == "v2":
-            v2 = codemap.v3_to_v2(s, c)
+            v2 = codemap.v3_to_v2(s, c, self.src.version)
             if v2 is None or not (codemap.code_valid(tgt, s, v2) or
                                   (s in "CJI" and self.opts.keep_v2_nonstandard)):
                 self._lose_col(f"obs-code-not-representable:{s}:{c}", st, s, i)
@@ -531,13 +546,27 @@ class _ObsConverter:
         b2 = 0
         crx1 = self.opts.crx1 and self.tlayout == "v2"
         crx1_flags = 0
+        # --align-phases (PLAN 3.3 rules 2/3): phase values shifted, in the units they are stored
+        # in (a scale factor in force multiplies the shift: rinex305.txt Table A2 'factor to
+        # divide stored observations with')
+        aligning = bool(getattr(self, "align", None) or getattr(self, "align_undo", None))
+        self._uscope = {(s, c): 0 for s, by in (getattr(self, "align_undo", None) or {}).items() for c in by}
+        afac = self._align_scale(None, self.src.header) if aligning else None
+        shifted = Counter()
         for ep in self.src.iter_epochs():
             sid = ep.types.key
             tst = self.tstates[sid]
             if 2 <= ep.flag <= 5:
-                if wl is not None and ep.flag in (3, 4):
+                if aligning and 2 <= ep.flag <= 5:
+                    afac = self._align_scale(afac, ep.records)
+                    if self._unalign_k:
+                        grp = parse_scale_factors(ep.records)
+                        for (s, c) in self._uscope:
+                            if (s, "*") in grp or (s, c) in grp:
+                                self._uscope[(s, c)] = ep.lineno
+                if wl is not None and 2 <= ep.flag <= 5:
                     update_wavelength(wl, ep.records)
-                if self.tlayout == "v2" and self.slayout == "v3" and ep.flag in (3, 4) and any(
+                if self.tlayout == "v2" and self.slayout == "v3" and 2 <= ep.flag <= 5 and any(
                         r.label == "SYS / SCALE FACTOR" for r in ep.records):
                     scale = merge_scale(scale, parse_scale_factors(ep.records))
                     self.r.rule("OBS.V3V2.EVENT-SCALE-APPLIED")
@@ -546,8 +575,10 @@ class _ObsConverter:
                     continue
                 if ep.time is not None and self.target < "4.02" and (ep.time[5] * 10 ** 7) % 1:
                     self.r.loss("epoch-precision", 1)     # as for observation epochs, below
-                yield Epoch(_add_seconds(ep.time, self.time_shift), ep.flag, None, records=recs, types=tst,
-                            lineno=ep.lineno)
+                # the event's EPOCH record keeps its receiver clock offset, with the rules of
+                # observation epochs (rinex305.txt Table A3 p.59; rinex211.txt Table A2)
+                yield Epoch(_add_seconds(ep.time, self.time_shift), ep.flag, self._clock_out(ep.clock),
+                            records=recs, types=tst, lineno=ep.lineno)
                 continue
             sats = []
             data = []
@@ -571,6 +602,12 @@ class _ObsConverter:
                     if clear_b2 and f[14] in "4567":
                         parts[k] = f[:14] + _CLEAR_B2[f[14]] + f[15]
                         b2 += 1          # flag-only fields too: their LLI changes (Sol round 10)
+                if aligning and ep.flag <= 1:
+                    # (observation epochs only: a flag-6 record holds slips, not phases)
+                    self._align_fields(s, sat, sid, offs, parts, afac, shifted)
+                elif aligning and self._unalign_k:
+                    # a slip record of a code stored under a finer factor: the same factor
+                    self._align_fields(s, sat, sid, offs, parts, afac, shifted, slips=True)
                 if (wl is not None and ep.flag <= 1) or scale is not None:
                     parts = self._field_rules(s, sat, sid, offs, parts,
                                               wl if ep.flag <= 1 else None, scale)
@@ -598,9 +635,7 @@ class _ObsConverter:
             if not sats and ep.sats:
                 dropped_empty += 1
                 continue
-            clock = ep.clock
-            if clock is not None and self.tlayout == "v2":
-                clock = self._clock_v2(clock)
+            clock = self._clock_out(ep.clock)
             if ep.time is not None and self.target < "4.02" and (ep.time[5] * 10 ** 7) % 1:
                 # sub-0.1-us epoch digits exist only in 4.02 (rinex_4.02.txt Table A3)
                 self.r.loss("epoch-precision", 1)
@@ -608,6 +643,28 @@ class _ObsConverter:
                         lineno=ep.lineno)
         if zero_norm:
             self.r.normalise("missing-zero-written-blank", zero_norm)
+        for key, n in sorted(shifted.items(), key=lambda kv: [str(x) for x in kv[0]]):
+            what = key[0]
+            if what in ("applied", "removed"):
+                # counted per system, target code and shift (cycles), so the checker can verify them
+                s, code, d = key[1:]
+                self.r.normalise(f"phase-shift-{what}:{s}:{code}:{d.normalize():+f}", n)
+            elif what == "scaled":
+                # stored under a finer SYS / SCALE FACTOR (_unalign_scale_plan), exact
+                self.r.rule("OBS.PHASE.UNALIGN-SCALE", n=n)
+            elif what == "precision":
+                # rounded to F14.3's 3 decimals, half-even (_shift_field)
+                self.r.loss(f"phase-{key[1]}-precision:{key[2]}:{key[3]}", n)
+            else:
+                # clipped by 1e9 with LLI bit 0 set (rinex305.txt section 6.7)
+                self.r.normalise(f"phase-shift-clipped:{key[2]}:{key[3]}", n)
+                self.r.rule("OBS.PHASE.ALIGN-CLIPPED", n=n)
+        if getattr(self, "_unalign_entries", None) is not None:
+            # --align-phases to 3.00: an entry is undone when it changed a value the output keeps;
+            # the others have no 3.00 form (Astra round 39: counted by code column before)
+            n = self._unalign_entries - len(self._undone)
+            if n:
+                self.r.loss("phase-shift-record-not-representable", n)
         if crx1_flags:
             self.r.loss("flags-on-missing-value-dropped", crx1_flags)
         if b2:
@@ -617,11 +674,150 @@ class _ObsConverter:
         if dropped_empty:
             self.r.loss("epoch-emptied-by-system-removal", dropped_empty)
 
+    def _align_scale(self, cur, records):
+        """The scale factors in force for --align-phases, keyed by source code: the header's,
+        then each event's group, flags 2-5 (merge_scale). RINEX 3: SYS / SCALE FACTOR; RINEX 2:
+        the 2.20 OBS SCALE FACTOR, under system ''. The output keeps the source's factors for
+        the codes it writes (scale_records, _v2_scale_for), so a stored value moves by the
+        shift times its factor."""
+        if self.slayout == "v3":
+            new = parse_scale_factors(records)
+        else:
+            new = {}
+            for fac, codes, line in parse_obs_scale_v2(records):
+                if not codes:
+                    new[("", "*")] = Decimal(fac)
+                for c in codes:
+                    new[("", c)] = Decimal(fac)
+        return new if cur is None else (merge_scale(cur, new) if new else cur)
+
+    def _align_factor(self, afac, s, code):
+        k = "" if self.slayout == "v2" else s          # RINEX 2: one list for every system
+        return afac.get((k, code)) or afac.get((k, "*")) or Decimal(1)
+
+    def _align_fields(self, s, sat, sid, offs, parts, afac, shifted, slips=False):
+        """Shift the phase values of one satellite record in place (--align-phases). To 3.00,
+        a code stored under a finer factor (_unalign_scale_plan: k) has every value multiplied
+        by k, slips (flag 6, slips=True) too, the corrected ones less their correction."""
+        src_codes = self.states[sid].codes(s)
+        tcodes = self.tstates[sid].codes(s)
+        if self.align:
+            plan = self.align.get(s)
+            if not plan:
+                return
+            for k, o in enumerate(offs):
+                d = plan.get(tcodes[k]) if o >= 0 else None
+                if not d:
+                    continue
+                sc = src_codes[o // FIELD]
+                new = self._shift_field(parts[k], d * self._align_factor(afac, s, sc), sat, tcodes[k],
+                                        shifted, ("align", s, tcodes[k]))
+                if new is not None:
+                    parts[k] = new
+                    shifted[("applied", s, tcodes[k], d)] += 1
+            return
+        undo = self.align_undo.get(s)
+        if not undo:
+            return
+        for k, o in enumerate(offs):
+            if o < 0:
+                continue
+            sc = src_codes[o // FIELD]
+            mult = self._unalign_k.get((s, sc, self._uscope.get((s, sc), 0)), 1)
+            cover = [(d, i) for d, sats, i in undo.get(sc, ()) if not sats or sat in sats]
+            ds = {d for d, i in cover}
+            d = next(iter(ds)) if len(ds) == 1 and not slips else Decimal(0)
+            if not d:
+                # none, or 0 (conflicts are refused in _unalign_plan): only the finer factor
+                if mult != 1:
+                    new = self._shift_field(parts[k], Decimal(0), sat, tcodes[k], shifted,
+                                            ("unalign", s, tcodes[k]), mult)
+                    if new is not None:
+                        parts[k] = new
+                        shifted[("scaled", s, tcodes[k])] += 1
+                continue
+            new = self._shift_field(parts[k], -d * self._align_factor(afac, s, sc) * mult, sat, tcodes[k],
+                                    shifted, ("unalign", s, tcodes[k]), mult)
+            if new is not None:
+                parts[k] = new
+                shifted[("removed", s, tcodes[k], d)] += 1
+                if mult != 1:
+                    shifted[("scaled", s, tcodes[k])] += 1
+                # an entry is undone once it changed a value the output keeps (Astra round 39)
+                self._undone.update(i for d2, i in cover)
+
+    def _shift_field(self, f, delta, sat, code, shifted, key, mult=1):
+        """An F14.3 + LLI + SSI field with `delta` added to its value; None for a missing value
+        (blank or zero: it stays missing).
+          - A result with more than 3 decimals (a correction F8.5 gives 5, rinex305.txt Table A2
+            p.57; an input value written with more) is rounded half-even to F14.3's 3 (rinex300.txt
+            Table A2, rinex305.txt Table A3), claimed phase-align-precision /
+            phase-unalign-precision:<sys>:<code> (Astra round 39: 5 decimals were written).
+          - A result F14.3 cannot hold is clipped by 1e9 towards zero and LLI bit 0 is set
+            ('Phase values overflowing the fixed format F14.3 have to be clipped into the valid
+            interval (e.g. add or subtract 10**9), set LLI indicator', rinex211.txt Table A2,
+            rinex305.txt section 6.7), counted as phase-shift-clipped:<sys>:<code>.
+          - A result of exactly 0.000 (which reads as missing) is refused."""
+        v = f[:14]
+        if not v.strip(_ZERO_CHARS):
+            return None
+        try:
+            x = Decimal(v.strip()) * mult + delta
+        except ArithmeticError:
+            raise CorruptError(f"{sat} {code} value {v.strip()!r} cannot be shifted for --align-phases",
+                               rule="OBS.DATA.FIELD") from None
+        q = x.quantize(_Q3, rounding=ROUND_HALF_EVEN)
+        if q != x:
+            shifted[("precision",) + key] += 1
+        lli = f[14]
+        try:
+            txt = fmt_f(q, 14, 3)
+        except OverflowError:
+            q = q - Decimal(10 ** 9) if q > 0 else q + Decimal(10 ** 9)
+            txt = fmt_f(q, 14, 3)
+            lli = str((int(lli) if lli.strip() else 0) | 1)
+            shifted[("clipped",) + key] += 1
+        if q == 0:
+            raise NotRepresentableError(f"--align-phases: {sat} {code} {v.strip()} shifted by {delta} gives "
+                                        "0.000, which RINEX reads as a missing observation")
+        return txt + lli + f[15]
+
+    def _clock_out(self, clock):
+        """A receiver clock offset (any epoch flag) for the target: F12.9 in RINEX 2
+        (rinex211.txt Table A2), F15.12 in 3.x/4.x (rinex305.txt Table A3 p.59). An offset
+        written wider than its field (readable, a validator warning: ' 123.4567890' in RINEX
+        2's columns 69-80) may have no F15.12 form: dropped, claimed clock-overflow (it
+        escaped as an OverflowError, round 32)."""
+        if clock is None:
+            return None
+        if self.tlayout == "v2":
+            return self._clock_v2(clock)
+        try:
+            fmt_f(clock, 15, 12)
+        except OverflowError:
+            self.r.loss("clock-overflow", 1)
+            return None
+        return clock
+
     def _clock_v2(self, clock):
         q = clock.quantize(Decimal("1e-9"), rounding=ROUND_HALF_EVEN)
         try:
             fmt_f(q, 12, 9)
         except OverflowError:
+            # no F12.9 form (rinex211.txt Table A2). A value that was written readably in 12
+            # columns all the same (' 123.4567890', F12.7: a validator warning) is carried as
+            # written, exactly (rinexcore.obs.fmt_clock as_written), with an input warning
+            # (round 32: it was dropped as clock-overflow, 2.11 -> 2.11 too); only one that
+            # cannot be written in 12 columns is dropped
+            t = f"{clock:f}"
+            t = t[1:] if t.startswith("0.") else "-" + t[2:] if t.startswith("-0.") else t
+            if len(t) <= 12:
+                self.r.rule("OBS.CLOCK.NOT-F12.9")
+                if not getattr(self, "_clock_warned", False):
+                    self._clock_warned = True
+                    self.r.warn("OBS.CLOCK.NOT-F12.9", f"receiver clock offset {t} has no F12.9 form "
+                                "(rinex211.txt Table A2): written as the input has it")
+                return clock
             self.r.loss("clock-overflow", 1)
             return None              # dropped: its rounding is not a second loss (Sol round 13 audit)
         if q != clock:
@@ -702,6 +898,7 @@ class _ObsConverter:
     def convert_event_records(self, ep, tst):
         recs = []
         phase = []
+        v2scale = []
         for r in ep.records:
             lab = r.label
             if self.foreign(lab):
@@ -769,11 +966,16 @@ class _ObsConverter:
                 else:
                     # its effect moves into LLI bit 1 of the following epochs (_wavelength_rule)
                     self.r.rule("OBS.V2V3.WAVELENGTH-EVENT-TO-LLI")
+            elif lab == "OBS SCALE FACTOR" and self.slayout == "v2" and self.tlayout == "v3":
+                v2scale.append(r)             # becomes SYS / SCALE FACTOR, below (as in the header)
             elif lab not in KNOWN:
                 recs.append(r)
                 self.r.rule("OBS.EVENT.NONSTANDARD-CARRIED")
             else:
                 self.r.loss(f"event-record-not-representable:{lab}", 1)
+        if v2scale:
+            # with the type list in force after the event (a flag-4 event may change both)
+            recs.extend(self._v2_scale_for(v2scale, ep.types.key))
         if phase:
             lab = obsheader.label_text(self.target, "SYS / PHASE SHIFT")
             recs.extend(HeaderRecord(lab, x.content, x.lineno)
@@ -783,8 +985,21 @@ class _ObsConverter:
             recs.extend(self.types_records(tst))
         if self.tlayout == "v3" and any(r.label == "SYS / SCALE FACTOR" and not self.foreign(r.label)
                                         for r in ep.records):
-            recs.extend(self._scale_for(ep.records, ep.types.key))
+            recs.extend(self._scale_for(ep.records, ep.types.key,
+                                        {(s, c) for s, c, f in self._unalign_scales(ep.lineno)}))
+            recs.extend(self._unalign_scale_records(ep.lineno))      # (--align-phases to 3.00)
         if any(r.label in ("# OF SATELLITES", "PRN / # OF OBS") for r in ep.records):
+            # recomputed from the output, as the header's; an event's own counts that disagree
+            # with the input's data are a repair, as the header's are (round 32: replaced
+            # unreported)
+            src = [r for r in ep.records if r.label in ("# OF SATELLITES", "PRN / # OF OBS")]
+            try:
+                agree = _counts_agree(src, self._source_count_records())
+            except ValueError:
+                agree = False                 # unreadable counts (an event's are not validated)
+            if not agree:
+                self.r.repair("HDR.COUNTS", "# OF SATELLITES / PRN / # OF OBS of the event at input line "
+                              f"{ep.lineno} recomputed from the data (rinex305.txt Table A2)", ep.lineno)
             recs.extend(self.count_records())
         if not recs and ep.records:
             if ep.flag == 4:
@@ -987,7 +1202,7 @@ class _ObsConverter:
         if src is None:
             return None
         try:
-            v = Decimal(src.content[0:10].strip())
+            v = _num(src.content[0:10])
         except Exception:
             self.r.repair("HDR.INTERVAL", "unreadable INTERVAL dropped", src.lineno)
             return None
@@ -1024,7 +1239,46 @@ class _ObsConverter:
                    if self.tlayout == "v3" else self.systems)
         state = self._phase_state_of(entries)
         self.phase_state = state
-        has_values = any(e[2] is not None for e in entries)
+        # a record that names a code says something about the phases (applied values, zeros =
+        # aligned at the source, or from 3.02 a code alone = only reference signals,
+        # rinex302.txt p.41); only the system-only form ('unknown') says nothing
+        named = any(e[1] for e in entries)
+        self.align, self.align_undo = {}, {}
+        self._unalign_entries, self._undone = None, set()
+        self._unalign_k, self._unalign_fsrc = {}, {}
+        if self.opts.align_phases:
+            if self.phase_seq and any(item[0] == "phase" for item in self.phase_seq):
+                raise InvocationError("--align-phases does not handle SYS / PHASE SHIFT records inside "
+                                      "events (the alignment changes during the file); convert without it")
+            if tv == "3.00":
+                self._unalign_plan(entries)
+                # the entries whose correction changes a value the output keeps are in the data
+                # then; the others (zeros, codes alone, no data) have no 3.00 form: claimed when
+                # pass 2 has run (convert_epochs; Astra round 39)
+                self._unalign_entries = len(entries) if entries and any(e[1] for e in entries) else None
+                return []
+            else:
+                planned = self._align_plan(entries, state)
+                if not planned:
+                    self.r.warn("OBS.PHASE.ALIGN-NOTHING-TO-DO", "--align-phases: no system of unknown "
+                                "phase alignment with phase types: nothing was shifted")
+                if planned:
+                    out = self._phase_records_rest([e for e in entries if e[0] not in planned],
+                                                   [s for s in systems if s not in planned], state)
+                    for s in [x for x in self.sys_order() if x in planned]:
+                        moved = [(c, d) for c, d in planned[s].items() if d != 0]
+                        if moved:
+                            # the corrections applied, for all satellites (rinex302.txt section 9.1
+                            # p.41: 'Phase corrections must be reported ... to allow the reconstruction
+                            # of the original values'; the uncorrected reference group is not listed)
+                            for c, d in moved:
+                                out.extend(_phase_lines(s, c, d, []))
+                        else:
+                            # no pair affected: 'the observation code field is defined and the rest
+                            # ... left blank' (rinex302.txt section 9.1 p.41, rinex305.txt 5.2.12)
+                            for c in planned[s]:
+                                out.extend(_phase_lines(s, c, None, []))
+                    return out
         if tv < "3.01":
             if entries and any(e[1] for e in entries):
                 self.r.loss("phase-shift-record-not-representable", len(entries))
@@ -1052,7 +1306,9 @@ class _ObsConverter:
                     if e[0] in self.systems:
                         out.extend(_phase_lines(*e[:4]) if e[6] else e[5])
                 return out
-            if has_values:
+            if named:
+                # (a code without a value too, since 3.02 made it the 'only reference signals'
+                # form: a 3.02-3.05 code-only record went unclaimed, round 32)
                 # entries of systems the output holds (a type list, header or event); a system
                 # left without types has its values claimed already (generator round 27: a
                 # BeiDou L1N entry, no 4.02 code, was counted too)
@@ -1074,6 +1330,234 @@ class _ObsConverter:
                 out = self._phase_from_state([], systems, {s: "unknown" for s in systems}, assume=False)
             return out
         return self._phase_from_state(entries, systems, state)
+
+    def _phase_records_rest(self, entries, systems, state):
+        """SYS / PHASE SHIFT of the systems --align-phases leaves alone (3.02-3.05 target): as
+        without the option."""
+        if "3.01" <= self.src.version < "4":
+            return self._carry_phase(entries)
+        return self._phase_from_state(entries, systems, state)
+
+    def _align_plan(self, entries, state):
+        """--align-phases to 3.02-3.05 (PLAN section 3.3 rule 2): {sys: {target phase code:
+        Decimal shift}} for every system whose source alignment is unknown and that has phase
+        types; aligned systems (a 3.02+ zero or code-only record, a 3.01 record with values,
+        RINEX 4) are left as they are. Shifts come from the target version's table
+        (rinexcore.spec.phaseshift). Refused:
+          - a source record with applied corrections (a non-zero value): applying the table on
+            top would shift twice (rule 4); the option asserts something the file contradicts,
+            so this is an invocation error, not a property of the data;
+          - a phase code the table gives no number for (block-dependent, 'must be aligned to',
+            restricted, absent): refused-missing-information naming every such code (PLAN
+            section 1 clause 8: no physical value is invented, nothing is dropped)."""
+        from rinexcore.spec import phaseshift
+        tv = self.target
+        applied = [e for e in entries if e[0] in self.systems and e[1] and e[2] not in (None, Decimal(0))]
+        if applied:
+            raise InvocationError(
+                "--align-phases asserts the source phases are unaligned, but its SYS / PHASE SHIFT "
+                "records corrections already applied (" + ", ".join(f"{e[0]} {e[1]} {e[2]}" for e in applied[:4])
+                + "): applying the table on top would shift twice (PLAN 3.3 rule 4)")
+        plan, bad, guessed = {}, [], []
+        # RINEX 2 codes name no tracking mode: the attribute of a target code is the converter's
+        # default (codemap table or the L2C receiver rule) unless --overrides states it. Where the
+        # table's shift differs between the attributes the code could stand for, the shift
+        # would rest on that guess: refused (review round 39; PLAN section 1 clause 8)
+        from_v2 = {}
+        if self.slayout == "v2":
+            for (sid, s), m in self.code_of.items():
+                for v2, tc in m.items():
+                    from_v2.setdefault((s, tc), set()).add(v2)
+        ov = self.opts.overrides or {}
+        for s in self.systems:
+            if state.get(s) != "unknown":
+                continue
+            codes = self._phase_codes(s)
+            if not codes:
+                continue
+            sh = {}
+            for c in codes:
+                d = phaseshift.shift(tv, s, c)
+                if d is None:
+                    bad.append(f"{s} {c}")
+                    continue
+                sh[c] = d
+                v2s = [v for v in sorted(from_v2.get((s, c), ())) if not (ov.get(f"{s}:{v}") or ov.get(f"*:{v}"))]
+                if v2s:
+                    cands = [x for x in codemap_codes(tv, s) if x[:2] == c[:2]]
+                    if len({phaseshift.shift(tv, s, x) for x in cands}) > 1:
+                        guessed.append((s, v2s[0], c, cands))
+            plan[s] = sh
+        if bad or guessed:
+            msg = []
+            if bad:
+                msg.append(f"the RINEX {tv} table (Table {phaseshift.RULE_TABLE[tv]}) gives no shift for "
+                           f"{', '.join(bad)} (the value depends on the satellite block, the signal 'must be "
+                           "aligned to' another with no value given, is restricted, or is not in the table)")
+            if guessed:
+                msg.append("the RINEX 2 code names no tracking mode, and the table's shift differs between "
+                           "the ones it could be: " + "; ".join(
+                               f"{s} {v2} (written {c} by default; could be {', '.join(cands)})"
+                               for s, v2, c, cands in guessed)
+                           + '. State it with --overrides FILE, FILE holding JSON such as '
+                           + "{" + ", ".join(f'"{s}:{v2}": "{c}"' for s, v2, c, cands in guessed) + "}")
+            raise MissingInformationError(
+                "--align-phases: " + "; and ".join(msg) + "; no value is invented",
+                missing="phase-shift:" + ",".join([x.replace(" ", ":") for x in bad]
+                                                  + [f"{s}:{v2}" for s, v2, c, cands in guessed]))
+        for s in plan:
+            self.r.assume("phase-alignment", s, "user:--align-phases (source asserted unaligned)")
+        if plan:
+            self.r.rule(f"OBS.PHASE.ALIGN-{phaseshift.RULE_TABLE[tv]}-{tv}")
+        self.align = plan
+        return plan
+
+    def _unalign_plan(self, entries):
+        """--align-phases to 3.00 (PLAN section 3.3 rule 3; 3.00 leaves the shifts uncorrected,
+        rinex300.txt p.7): the corrections a 3.01-3.05 source record says were applied (non-zero
+        values) are subtracted, per system, code and satellites (phiRINEX = phi original + dphi,
+        rinex302.txt p.42). A zero form, reference signals only, an unknown form or a RINEX 4
+        source (aligned by definition) holds no applied value: there is nothing to undo, the
+        data stay as they are, and that is reported (warning OBS.PHASE.ALIGN-NOTHING-TO-UNDO).
+
+        Every entry counts, zeros and codes alone (no correction: 0) included, resolved per
+        system, code and satellite (a satellite list, or every satellite). Two entries of one
+        code covering a satellite with different values leave open which applies: refused
+        (refused-missing-information, naming them; review round 39: a zero entry for G12 was
+        dropped and G12 shifted by the other entry's -1/4). A correction for a code with no data
+        column is reported (warning OBS.PHASE.ALIGN-NO-COLUMN) and stays a lost record entry.
+        The entries undone are those that change a value the output keeps (_align_fields)."""
+        undo, nothing, conflicts, nocol = {}, [], [], []
+        sv = self.src.version
+        for s in self.systems:
+            mine = [e for e in entries if e[0] == s and e[1]] if "3.01" <= sv < "4" else []
+            cols = {c for st in self.states.values() for c in st.codes(s)}
+            by_code = {}
+            for e in mine:
+                by_code.setdefault(e[1], []).append((e[2] if e[2] is not None else Decimal(0), set(e[3]),
+                                                     next(i for i, x in enumerate(entries) if x is e)))
+            for code, lst in by_code.items():
+                for i, (v1, s1, i1) in enumerate(lst):
+                    for v2, s2, i2 in lst[i + 1:]:
+                        if v1 != v2 and (not s1 or not s2 or s1 & s2):
+                            both = sorted(s1 & s2) if s1 and s2 else sorted(s1 or s2) or ["every satellite"]
+                            conflicts.append(f"{s} {code} {', '.join(both)}: {v1} and {v2}")
+            applied = [e for e in mine if e[2] not in (None, Decimal(0))]
+            for e in applied:
+                if e[1] not in cols:
+                    nocol.append(f"{s} {e[1]} {e[2]}")
+            if any(e[1] in cols for e in applied):
+                undo[s] = {code: lst for code, lst in by_code.items() if code in cols}
+            elif self._has_phase(s):
+                nothing.append(s)
+        if conflicts:
+            raise MissingInformationError(
+                "--align-phases to 3.00: SYS / PHASE SHIFT gives one satellite's phase two different "
+                f"corrections ({'; '.join(conflicts[:6])}); the record does not say which applies",
+                missing="phase-shift-conflict:" + ",".join(c.split(":")[0].replace(" ", ":") for c in conflicts))
+        if undo:
+            self.r.rule("OBS.PHASE.UNALIGN-3.00")
+        if nothing:
+            self.r.warn("OBS.PHASE.ALIGN-NOTHING-TO-UNDO", f"--align-phases to 3.00: no applied phase "
+                        f"correction is recorded for {', '.join(nothing)} (zero form, reference signals "
+                        "only, unknown, or aligned by definition): their phase values are unchanged")
+        if nocol:
+            self.r.warn("OBS.PHASE.ALIGN-NO-COLUMN", "--align-phases to 3.00: recorded corrections for codes "
+                        f"the file has no observations of ({', '.join(nocol[:6])}): nothing to undo")
+        self.align_undo = undo
+        self._unalign_k = self._unalign_scale_plan(undo) if undo else {}
+
+    _ALLOWED_FACTORS = (1, 10, 100, 1000)     # SYS / SCALE FACTOR (rinex300.txt Table A1 p.28: I4)
+
+    def _unalign_scale_plan(self, undo):
+        """{(sys, source code, scope): k} for --align-phases to 3.00: a correction F8.5 has up to
+        5 decimals (rinex305.txt Table A2 p.57), an observation F14.3 three, but 3.00 stores
+        finer values under SYS / SCALE FACTOR ('to increase resolution by 10, 100, etc',
+        rinex300.txt section 5.5 p.12; 1, 10, 100 or 1000, Table A1 p.28), so the phase less its
+        correction is kept exactly (PLAN section 1 clause 6) where a factor does it: per system,
+        code and scope (the header, then each event whose SYS / SCALE FACTOR names the code or
+        all the system's types: rinex305.txt section 6.5), the smallest k (1, 10, 100, 1000)
+        such that the source's factor times k is an allowed factor and every stored value of the
+        code in the scope (all satellites, flags 0, 1 and 6), less the correction that applies
+        to it, is exact at three decimals once multiplied by k and fits F14.3 (an input value
+        with more than three decimals counts too). Where none
+        does, k is 1 and the value is rounded half-even, claimed phase-unalign-precision
+        (_shift_field). Round 39 (Astra): it was always rounded."""
+        need = {(s, code): {d for d, sats, i in lst if d}
+                for s, by in undo.items() for code, lst in by.items() if any(d for d, sats, i in lst)}
+        if not need:
+            return {}
+        afac = self._align_scale(None, self.src.header)
+        scope = {k: 0 for k in need}
+        stats = {}                              # (s, code, scope) -> [fsrc, max, min, decimals]
+        for ep in self.src.iter_epochs():
+            if 2 <= ep.flag <= 5:
+                grp = parse_scale_factors(ep.records)
+                if grp:
+                    for (s, c) in need:
+                        if (s, "*") in grp or (s, c) in grp:
+                            scope[(s, c)] = ep.lineno
+                    afac = merge_scale(afac, grp)
+                continue
+            codes_of = ep.types
+            for sat, rec in zip(ep.sats, ep.data):
+                s = sat[0]
+                if s not in undo:
+                    continue
+                for i, code in enumerate(codes_of.codes(s)):
+                    if (s, code) not in need:
+                        continue
+                    v = rec[i * FIELD:i * FIELD + 14]
+                    if not v.strip(_ZERO_CHARS):
+                        continue
+                    try:
+                        x = Decimal(v.strip())
+                    except ArithmeticError:
+                        continue
+                    fsrc = self._align_factor(afac, s, code)
+                    if ep.flag <= 1:
+                        ds = {d for d, sats, j in undo[s][code] if not sats or sat in sats}
+                        if len(ds) == 1:
+                            x = x - next(iter(ds)) * fsrc
+                    st = stats.setdefault((s, code, scope[(s, code)]), [fsrc, x, x, 0])
+                    st[1], st[2] = max(st[1], x), min(st[2], x)
+                    st[3] = max(st[3], -x.normalize().as_tuple().exponent)
+        plan = {}
+        self._unalign_fsrc = {k: v[0] for k, v in stats.items()}
+        for (s, code, sc), (fsrc, hi, lo, dec) in stats.items():
+            for k in self._ALLOWED_FACTORS:
+                if fsrc * k not in self._ALLOWED_FACTORS:
+                    continue
+                # from the values themselves, each less the correction that applies to it: a
+                # recorded correction no value of the scope takes (a satellite list naming none
+                # observed) decides nothing (Astra verify 2, W2: it forced x100 on exact values)
+                exact = dec <= 3 + len(str(k)) - 1
+                fits = hi * k <= Decimal("9999999999.999") and lo * k >= Decimal("-999999999.999")
+                if exact and fits:
+                    if k > 1:
+                        plan[(s, code, sc)] = k
+                    break
+        return plan
+
+    def _unalign_scale_records(self, scope_of):
+        """SYS / SCALE FACTOR records for the factors _unalign_scale_plan chose in one scope
+        (the header: scope 0; an event: its input line), the source's factor times k, under the
+        target code."""
+        out = []
+        for s, tc, fac in self._unalign_scales(scope_of):
+            out.extend(format_scale(s, fac, [tc]))
+        return out
+
+    def _unalign_scales(self, scope_of):
+        """[(sys, target code, factor)] _unalign_scale_records writes in one scope."""
+        out = []
+        for (s, code, sc), k in sorted(getattr(self, "_unalign_k", {}).items(), key=lambda kv: str(kv[0])):
+            if sc != scope_of:
+                continue
+            fsrc = self._unalign_fsrc.get((s, code, sc), Decimal(1))
+            tc = next((m[code] for (sid, s2), m in self.code_of.items() if s2 == s and code in m), code)
+            out.append((s, tc, int(fsrc * k)))
+        return out
 
     def _unknown_phase_periods(self, entries):
         """{sys: where} for systems whose phases are of unknown alignment while the type
@@ -1099,9 +1583,16 @@ class _ObsConverter:
         return out
 
     def _phase_state_of(self, entries):
-        """Per system: 'aligned' (RINEX 4 source), 'recorded' (entries with codes and, before
-        3.03, values) or 'unknown' (RINEX 2/3.00 source, no entry, the system-only form, or
-        a 3.01/3.02 entry without values)."""
+        """Per system: 'aligned' (RINEX 4 source), 'recorded' (entries with codes and, in
+        3.01, values) or 'unknown' (RINEX 2/3.00 source, no entry, the system-only form, or
+        a 3.01 entry without values).
+
+        3.02 already has the three states of 3.03-3.05 (rinex302.txt section 9.1 p.41-42):
+        values zero = aligned at the source; observation code given and the rest blank =
+        only reference signals (aligned); code field and rest blank = unknown. Only 3.01 has
+        no such table and one blank form for 'none affected, or not known' (rinex301.txt
+        section 9.1 p.24-25), so a 3.01 code without a value stays 'unknown' (round 32: a
+        valid 3.02 code-only record was refused going to RINEX 4)."""
         sv = self.src.version
         state = {}
         for s in self.systems:
@@ -1114,7 +1605,7 @@ class _ObsConverter:
                 state[s] = "unknown"
             elif all(e[1] == "" for e in mine):
                 state[s] = "unknown"
-            elif sv < "3.03" and all(e[2] is None for e in mine):
+            elif sv < "3.02" and all(e[2] is None for e in mine):
                 state[s] = "unknown"
             else:
                 state[s] = "recorded"
@@ -1137,15 +1628,54 @@ class _ObsConverter:
     def _carry_phase(self, entries):
         """Same family: carry what the source recorded, renaming codes the target version
         spells differently (BDS B1I band) and dropping entries the target cannot hold.
-        Nothing is synthesised (PLAN §3.3 rule 1). Also used for the records of events."""
+        Nothing is synthesised (PLAN §3.3 rule 1). Also used for the records of events.
+
+        A 3.01 entry with a code and no value records no correction: 3.01 has one blank form
+        for 'none affected, or not known' (rinex301.txt section 9.1 p.24-25), read as unknown
+        (_phase_state_of). From 3.02 a code alone means 'only reference signals', i.e.
+        aligned (rinex302.txt section 9.1 p.41), so it is not carried: each such entry is
+        claimed phase-shift-entry-dropped, and a system with no other coded entry gets the
+        target's unknown form, the system alone, with the assumption and warning of PLAN
+        section 3.3 rule 1 (round 32).
+
+        The other way, a 3.02-3.05 code-only entry ('only reference signals') going to 3.01,
+        where a code without a value is no defined form and the one blank form, the system
+        alone, says 'no observation pairs affected by phase shifts, or not known' (rinex301.txt
+        p.25): the entry is claimed phase-shift-entry-dropped and the system gets that blank
+        form (PLAN section 3.3 rule 1: reference-only becomes blank for 3.01, reported). No
+        alignment assumption: the source's state was known, and 'none affected' is what the
+        3.01 form says (the zero form going to 3.01 is carried as 0 values, also without
+        one). Read back, the 3.01 file's blank form is unknown, as any 3.01 input's is."""
         sv, tv = self.src.version, self.target
         out = []
+        to301 = "3.02" <= sv < "4" and tv == "3.01"
+        recast = (sv == "3.01" and "3.02" <= tv < "4") or to301
+        unknown = set()                   # systems whose coded entries all lack a value
+        if recast:
+            for s in {e[0] for e in entries}:
+                coded = [e for e in entries if e[0] == s and e[1]]
+                if coded and all(e[2] is None for e in coded) and not any(
+                        e[0] == s and not e[1] for e in entries):
+                    unknown.add(s)
         for e in entries:
             s = e[0]
             if s not in self.systems:
                 continue
             if not e[1]:
                 out.extend(e[5])
+                continue
+            if recast and e[2] is None:
+                self.r.loss(f"phase-shift-entry-dropped:{s}:{e[1]}", 1)
+                if s in unknown:
+                    unknown.discard(s)
+                    out.append(HeaderRecord("SYS / PHASE SHIFT", s))
+                    if to301:
+                        self.r.rule("OBS.PHASESHIFT.REFERENCE-ONLY-TO-301")
+                    elif self._has_phase(s):
+                        self.r.assume("phase-alignment", f"{s}:unknown", "spec-unknown-form")
+                        self.r.warn("OBS.PHASE-UNKNOWN", f"phase alignment of {s} unknown (a RINEX 3.01 "
+                                    "entry without a value): written as a fully blank SYS / PHASE SHIFT "
+                                    "(rinex302.txt section 9.1 p.41: such data should not be published)")
                 continue
             code, why = codemap.gate_v3(s, e[1], sv, tv) if len(e[1]) == 3 else (None, None)
             if code is None and tv == sv and not e[6]:
@@ -1196,10 +1726,12 @@ class _ObsConverter:
             else:
                 if self._has_phase(s):
                     self.r.assume("phase-alignment", f"{s}:unknown", "spec-unknown-form")
-                    if tv >= "3.03":
+                    if tv >= "3.02":
+                        # 3.02 has the 3.03+ forms already (rinex302.txt section 9.1 p.41-42);
+                        # 3.01's one blank form also means 'none affected' (rinex301.txt p.25)
                         self.r.warn("OBS.PHASE-UNKNOWN", f"phase alignment of {s} unknown: written as a "
-                                    "fully blank SYS / PHASE SHIFT (rinex305.txt §5.2.12 says such data "
-                                    "should not be published)")
+                                    "fully blank SYS / PHASE SHIFT (rinex305.txt §5.2.12, rinex302.txt "
+                                    "section 9.1 p.41: such data should not be published)")
                 out.append(HeaderRecord("SYS / PHASE SHIFT", s))
         if not out and systems:
             # no phase type anywhere (a code-only RINEX 4 file): the record is mandatory from
@@ -1302,12 +1834,49 @@ class _ObsConverter:
             if parse_scale_factors(self.own_header):
                 self.r.rule("OBS.V3V2.SCALE-APPLIED")
             return []
-        return self._scale_for(self.own_header, self.src.types.key)
+        if self.slayout == "v2":
+            return self._v2_scale_for(self.src.header, self.src.types.key)
+        return (self._scale_for(self.own_header, self.src.types.key,
+                                {(s, c) for s, c, f in self._unalign_scales(0)})
+                + self._unalign_scale_records(0))
 
-    def _scale_for(self, records, sid):
+    def _v2_scale_for(self, records, sid):
+        """SYS / SCALE FACTOR records for a RINEX 3/4 target from a RINEX 2 file's OBS SCALE
+        FACTOR (the unofficial RINEX 2.20 record that SYS / SCALE FACTOR 'is a modification
+        of': rinex300.txt section 5.5 p.12; parse_obs_scale_v2). The stored values are copied
+        unchanged, so the factor goes with them, per system, under the codes the values went
+        to (round 32: the record was carried verbatim under a label RINEX 3 does not define,
+        and a reader saw the values 10x too large). RINEX 3/4 allow the factors 1, 10, 100
+        and 1000 only (rinex305.txt Table A2 p.56, I4; rinex300.txt section 5.5: 'to increase
+        resolution by 10, 100, etc only'); another one is refused rather than applied to the
+        values (the user's choice, round 32)."""
+        groups = parse_obs_scale_v2(records)
+        if not groups:
+            return []
+        self.r.rule("OBS.V2V3.OBS-SCALE-FACTOR")
+        tst = self.tstates[sid]
+        out = []
+        for s in [x for x in self.sys_order() if tst.codes(x)]:
+            cmap = self.code_of.get((sid, s), {})
+            tgt = tst.codes(s)
+            for fac, codes, line in groups:
+                new = [cmap[c] for c in codes if c in cmap and cmap[c] in tgt]
+                if codes and not new:
+                    continue                  # none of its types is written for this system
+                if fac not in (1, 10, 100, 1000):
+                    raise NotRepresentableError(
+                        f"OBS SCALE FACTOR {fac} (input line {line}) has no RINEX {self.target} form: "
+                        "SYS / SCALE FACTOR takes 1, 10, 100 or 1000 (rinex305.txt Table A2), and "
+                        "the scaled values are not rewritten")
+                out.extend(format_scale(s, fac, new))
+        return out
+
+    def _scale_for(self, records, sid, omit=frozenset()):
         """SYS / SCALE FACTOR records for a v3/v4 target: codes renamed as the data were
         (e.g. BeiDou B1I band), codes and systems the target lost dropped. The records are
-        kept verbatim when nothing changes (rinex305.txt Table A2: factor per code)."""
+        kept verbatim when nothing changes (rinex305.txt Table A2: factor per code). `omit`:
+        (sys, target code) listed codes left out because _unalign_scale_records gives them a
+        finer factor in the same place (one code listed twice in one group would have two)."""
         src = [r for r in records if r.label == "SYS / SCALE FACTOR"]
         if not src:
             return []
@@ -1325,13 +1894,19 @@ class _ObsConverter:
             groups.append((s, fac, new) if new else None)
         same = all(g is not None for g in groups) and [
             (s, fac, codes) for s, fac, codes in parse_scale_groups(src)] == groups
-        if same:
+        dup = any((g[0], c) in omit for g in groups if g is not None for c in g[2])
+        if same and not dup:
             return src
-        self.r.rule("OBS.SCALE-FACTOR.REMAPPED")
+        if not same:
+            self.r.rule("OBS.SCALE-FACTOR.REMAPPED")
         out = []
         for g in groups:
             if g is not None:
-                out.extend(format_scale(*g))
+                s, fac, codes = g
+                left = [c for c in codes if (s, c) not in omit]
+                if codes and not left:
+                    continue
+                out.extend(format_scale(s, fac, left))
         return out
 
     def build_header(self):
@@ -1393,6 +1968,11 @@ class _ObsConverter:
             if lab == "SYS / PHASE SHIFTS" and self.src.version != "3.01":
                 r.repair("HDR.PHASESHIFT.LABEL", "label SYS / PHASE SHIFTS (the 3.01 spelling) read "
                          "as SYS / PHASE SHIFT", rec.lineno)
+            if lab == "OBS SCALE FACTOR" and self.slayout == "v2" and tlay == "v3":
+                # RINEX 2.20's record becomes SYS / SCALE FACTOR (scale_records), placed in
+                # the canonical order below; to RINEX 2 it stays as written (a non-standard
+                # record, below)
+                continue
             slot = slot_of.get(lab)
             if slot is not None:
                 if slot not in placed:
@@ -1461,9 +2041,10 @@ class _ObsConverter:
         if tlay == "v2" and self.slayout == "v3":
             generated["WAVELENGTH"] = [HeaderRecord("WAVELENGTH FACT L1/2", "     1     1")]
             r.rule("OBS.V3V2.WAVELENGTH-DEFAULT")
-        # mandatory or generated records the source did not have
+        # mandatory or generated records the source did not have (SYS / SCALE FACTOR: from a
+        # RINEX 2 OBS SCALE FACTOR, the only source of it a RINEX 2 file has)
         for slot in ("RINEX VERSION / TYPE", "OBS TYPES", "TIME OF FIRST OBS", "SYS / PHASE SHIFT",
-                     "GLONASS", "GLONASS CPB", "WAVELENGTH"):
+                     "GLONASS", "GLONASS CPB", "WAVELENGTH", "SYS / SCALE FACTOR"):
             if slot not in placed and generated.get(slot):
                 for g in generated[slot]:
                     _insert_canon(out, g)
@@ -1558,6 +2139,11 @@ class _ObsConverter:
     # -- run ---------------------------------------------------------------------
     def run(self):
         self.survey()
+        n = getattr(self.src, "skipped_text", 0)
+        if n:
+            # --lenient: text in columns no field covers, dropped by the reader (one per line;
+            # rinexcore.obs._skipped): reported, not silently cut (round 32)
+            self.r.loss("data-text-dropped", n)
         self.choose_systems()
         snap = self.r.snapshot()          # the drop-unresolvable retry starts from here
         self.build_target_states()
@@ -1643,6 +2229,12 @@ TIME_SYSTEMS = {"GPS", "GLO", "GAL", "BDT", "QZS", "IRN", "UTC", "TAI"}
 _CLEAR_B2 = {"4": "0", "5": "1", "6": "2", "7": "3"}
 
 
+def codemap_codes(version, system):
+    """The observation codes `version` defines for `system` (rinexcore.spec.obscodes), sorted."""
+    from rinexcore.spec import obscodes
+    return sorted(obscodes.valid_codes(version, system))
+
+
 def lli_bit2_meaning(version):
     """LLI bit 2: 'observation under anti-spoofing' in RINEX 2 (rinex211.txt Table A2),
     undefined in 3.00 (rinex300.txt ~1970), 'BOC tracking of an MBOC-modulated signal' from
@@ -1652,6 +2244,39 @@ def lli_bit2_meaning(version):
     if version < "3.01":
         return None
     return "boc-tracking"
+
+
+def parse_obs_scale_v2(records):
+    """[(factor, [RINEX 2 codes] or [] for all types, input line)] from OBS SCALE FACTOR
+    records of a RINEX 2 file: the unofficial RINEX 2.20 record (Gurtner and Estey 2002,
+    'RINEX Version 2.20 Modifications to Accommodate Low Earth Orbiter Data', cited in
+    rinex300.txt l.1583), which RINEX 3 turned into SYS / SCALE FACTOR (rinex300.txt section
+    5.5 p.12). UNVERIFIED: the 2.20 document is not in specs/, so the layout below is the one
+    the round-32 brief gives, not checked against the 2.20 text. Layout: I6 factor to divide the stored
+    observations with, I6 number of types (0 or blank: all), 8(4X,A2) types; a line without
+    a factor or count continues the types of the line before (6X or 12X before them). A
+    record that does not read so (count and types disagree, a code that is not two
+    characters, a factor below 1) is refused: its values cannot be given their meaning."""
+    out = []
+    for r in records:
+        if r.label != "OBS SCALE FACTOR":
+            continue
+        c = r.content.ljust(60)
+        if not c[0:6].strip() and not c[6:12].strip().isdecimal():
+            if not out:
+                raise CorruptError("OBS SCALE FACTOR continuation without a first line", line=r.lineno,
+                                   rule="HDR.OBSSCALE")
+            out[-1][1].extend(c[6:60].split())
+            continue
+        f, n = c[0:6].strip(), c[6:12].strip()
+        if not (f.isdecimal() and f.isascii()) or (n and not (n.isdecimal() and n.isascii())):
+            raise CorruptError(f"bad OBS SCALE FACTOR {c[:12]!r} (I6,I6)", line=r.lineno, rule="HDR.OBSSCALE")
+        out.append([int(f), c[12:60].split(), int(n or 0), r.lineno])
+    for fac, codes, n, line in out:
+        if fac < 1 or len(codes) != n or any(len(x) != 2 for x in codes):
+            raise CorruptError(f"OBS SCALE FACTOR {fac} declares {n} types and lists {codes} (I6,I6,"
+                               "8(4X,A2))", line=line, rule="HDR.OBSSCALE")
+    return [(fac, codes, line) for fac, codes, n, line in out]
 
 
 def parse_scale_groups(records):
@@ -1664,7 +2289,7 @@ def parse_scale_groups(records):
         c = r.content.ljust(60)
         if c[0:1].strip():
             try:
-                fac = Decimal(c[2:6].strip() or "1")
+                fac = _num(c[2:6].strip() or "1")
             except ArithmeticError:
                 raise CorruptError("bad SYS / SCALE FACTOR", line=r.lineno, rule="HDR.SCALE") from None
             out.append((c[0:1], fac, _a3_codes(c[10:60])))
@@ -1733,7 +2358,7 @@ def _parse_time_rec(r):
     c = r.content
     try:
         return (int(c[0:6]), int(c[6:12]), int(c[12:18]), int(c[18:24]), int(c[24:30]),
-                Decimal(c[30:43].strip()))
+                _num(c[30:43]))
     except (ValueError, ArithmeticError):
         return None
 
@@ -1812,7 +2437,7 @@ def parse_phase_shift(header, empty=None):
                 raw, code = code, "L" + code
             val = c[6:14].strip()
             try:
-                v = Decimal(val) if val else None
+                v = _num(val) if val else None
             except ArithmeticError:
                 raise CorruptError(f"bad SYS / PHASE SHIFT value {val!r}", line=r.lineno,
                                    rule="HDR.PHASESHIFT") from None
@@ -1882,22 +2507,30 @@ def _cpb_known_nonzero(r):
         v = c[k * 13 + 5:k * 13 + 13].strip()
         if v:
             try:
-                vals.append(Decimal(v))
+                vals.append(_num(v))
             except ArithmeticError:
                 return True
     return any(v != 0 for v in vals)
 
 
 def merge_scale(scale, new):
-    """The factors after an event's SYS / SCALE FACTOR: a factor for every type of a system
-    replaces that system's factors; one for listed types changes only those ('each value
-    remains valid until changed by an additional header record', rinex305.txt §6.5)."""
+    """The factors after an event's SYS / SCALE FACTOR records, `new` being the event's records
+    read as one group (parse_scale_factors), with the header's precedence: within a group a
+    listed code's factor beats its system's 'all types' (0 or blank count) one, whatever the
+    record order (the lookup tries (sys, code) before (sys, '*')). The spec gives no
+    precedence for overlapping records (rinex305.txt section 5.2.11, Table A2: 'Repeat record
+    if different factors are applied to different observation types'): 'listed beats all' is
+    an inference, applied alike to the header and to events. Then, for each system the group
+    names: with an 'all types' factor, the group's factors replace all of the system's
+    earlier ones; otherwise only the listed codes change ('each value remains valid until
+    changed by an additional header record', rinex305.txt section 6.5). Round 32: the
+    records were applied one by one, so 'G 100 1 L1C' then 'G 10' lost L1C=100 in an event
+    but not in the header."""
     scale = dict(scale or {})
-    for (s, code), fac in new.items():
-        if code == "*":
-            for k in [k for k in scale if k[0] == s]:
-                del scale[k]
-        scale[(s, code)] = fac
+    for s in {s for (s, code) in new if code == "*"}:
+        for k in [k for k in scale if k[0] == s]:
+            del scale[k]
+    scale.update(new)
     return scale
 
 
@@ -1912,7 +2545,7 @@ def parse_scale_factors(header):
         if c[0:1].strip():
             s = c[0:1]
             try:
-                fac = Decimal(c[2:6].strip() or "1")
+                fac = _num(c[2:6].strip() or "1")
             except ArithmeticError:
                 raise CorruptError("bad SYS / SCALE FACTOR", line=r.lineno, rule="HDR.SCALE") from None
             codes = _a3_codes(c[10:60])

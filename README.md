@@ -3,7 +3,15 @@
 - **rinexconv** converts RINEX observation, navigation and meteorological files between
   versions 2.10, 2.11, 3.00–3.05 and 4.00–4.02 (it also reads 2.00 and 2.01). Inputs may be
   plain, gzip, Unix compress (`.Z`), bzip2, single-file zip, and Hatanaka (Compact RINEX
-  1.0/3.0/3.1) in any combination.
+  1.0/3.0/3.1) in any combination. A tar archive (`.tar`, `.tar.gz`/`.tgz`, `.tar.Z`,
+  `.tar.bz2`) is read in memory, nothing unpacked to disk: each RINEX file in it is converted
+  as if it had been given on the command line, and other members are skipped and listed
+  (`skipped: ARCHIVE:MEMBER (why)`). A member that has a RINEX file name but does not read as
+  RINEX is refused, not skipped. Same-day GLONASS nav companions are looked for next to the
+  archive, not inside it; `--merge` does not take archives. Two members with the same file
+  name in different folders of the archive name the same output, as two inputs with the same
+  name from different folders do: the second is reported as an I/O error ("exists") unless
+  `--force` is given, which overwrites the first.
 - **rinexqc** (quality analysis) is not built yet.
 
 The plan is [PLAN.md](PLAN.md); decisions and open questions are in
@@ -26,6 +34,7 @@ Useful options:
 | `--gz` / `--Z` / `--no-compress` | output compression (default: as the input) |
 | `--nav FILE` / `--glo-fcn FILE` | GLONASS frequency channels for RINEX 3.02+ output from RINEX 2/3.00/3.01 input (a nav file, a RINEX ≥ 3.02 obs file, or `R01 1` lines). Without either, a same-day GLONASS/mixed nav file next to the input is used if there is one (`--no-auto-nav` turns that off) |
 | `--assume-phase-aligned` | assert aligned phases when converting data of unknown phase alignment (RINEX 2, 3.00) to RINEX 4 |
+| `--align-phases` | RINEX 3.02–3.05 targets: assert the source phases are **unaligned** and add the target table's correction (3.02 Table A19, 3.03–3.05 Table A23; e.g. GPS L2X −¼, Galileo L1C +½) to the phases of every system whose alignment is unknown (RINEX 2, 3.00, a blank record); each shift is reported and written to SYS / PHASE SHIFT. A signal the table gives no number for (GPS L2C and QZSS L1S depend on the satellite block; "must be aligned to" rows such as GPS L5X; SBAS) refuses the conversion, naming it; a source whose record already shows applied corrections is refused (never shifted twice). RINEX 2 does not record a phase's signal attribute, so for a RINEX 2 input state it with `--overrides` (e.g. `{"G:L2": "L2W", "R:L2": "L2P"}`) wherever the shift depends on it; the refusal names what is needed. RINEX 3.00 target: removes the corrections a source record says were applied. Other targets (2.x, 3.01, 4.x) are refused: 3.01 has no table and the RINEX 4 tables give no values (use `--assume-phase-aligned` for RINEX 4) |
 | `--drop-unresolvable` | drop a system whose mandatory target values cannot be found, instead of refusing |
 | `--leap-seconds N` | GPS−UTC for RINEX 4 nav output when the source has none and the date is outside the built-in table |
 | `--merge` | merge several navigation inputs into one output; `--dedupe` removes exact duplicates |
@@ -34,7 +43,7 @@ Useful options:
 | `--keep-lli-bit2` | carry LLI bit 2 even where its meaning changes between versions |
 | `--approx-position X Y Z` | APPROX POSITION XYZ (WGS84, m) for RINEX 2 output from a RINEX 3/4 file that has none (moving platforms; RINEX 2 makes it mandatory, so without it the conversion refuses) |
 | `--approx-position-zero` | write teqc's `0 0 0` placeholder there instead; reported as an assumption and a warning, since zeros are not a position (`--approx-position` wins if both are given) |
-| `--qzss-ion-area WIDE\|JAPN` | area of the QZSS CNVX ION records of a 4.00/4.01 nav file, which 4.02 requires; without it those records are dropped and reported |
+| `--qzss-ion-area WIDE\|JAPN` | area of QZSS ionospheric sets whose source states none (RINEX 3 `QZSA`/`QZSB`, 4.02 records without `WIDE`/`JAPN`), written as the Region code of a 4.00/4.01 target; without it the code is left blank, which 4.00/4.01 read as wide area, and that is reported as an assumption. A source's own area always wins: the 4.00/4.01 Region code (0 or blank wide, 1 Japan) and the 4.02 `WIDE`/`JAPN` subtype convert into each other without the option |
 
 Every conversion ends in one outcome, which is also the exit code:
 
@@ -47,6 +56,17 @@ Every conversion ends in one outcome, which is also the exit code:
 | refused-corrupt | 4 | the input is damaged (file, line, column, rule) |
 | refused-not-representable | 6 | the target version cannot hold any of the input's data |
 | internal-error | 7 | a bug: please report the file |
+
+**Writing outputs.** The files made from one input (a RINEX 4 nav file split into RINEX 2 `n`, `g`
+and `h` files, say) are written as a set: every name is checked and reserved first, the data go to
+temporary files, and only then are they renamed into place; if anything fails or the run is
+interrupted, the set is removed and any file `--force` was replacing is put back. An existing output
+or report is never overwritten without `--force`. Writers to one output folder (`--jobs` workers, or
+separate runs) take turns through a lock file in the system temp folder (`rinexconv-locks/`), so two
+sets are never mixed, and an input's report is published together with its files. Limits: a hard kill
+(not Ctrl-C) between reserving the names and renaming can leave zero-byte files under the output names;
+a second failure during a roll-back can leave an old file under a `.rinexconv-….old` name, which the
+error message names.
 
 **Memory and speed.** A file is held in memory once as input and once as output, so a
 conversion needs about twice the file's decompressed size in free RAM. Outputs above 64 MB are

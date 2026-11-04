@@ -38,6 +38,7 @@ from rinexconv.engine import (WRITE_VERSIONS, Options, convert_data, convert_loa
 from rinexcore.errors import RinexError  # noqa: E402
 from rinexcore.io.compress import unwrap  # noqa: E402
 from tests.independent.compare import compare_met, compare_nav, compare_obs  # noqa: E402
+from tests.independent.navfields import compare_nav_fields  # noqa: E402
 from tests.independent.tokens import lines_of, met_tokens, nav_tokens, obs_tokens  # noqa: E402
 from tests.independent.allowed import check as allowed_check  # noqa: E402
 
@@ -106,6 +107,10 @@ def _norm_header_line(line):
     body = line[:60]
     if label == "RINEX VERSION / TYPE":
         body = body[:9] + " " + body[20:21] + " " + body[40:41]
+    if label == "LEAP SECONDS" and body[24:27].strip() == "GPS":
+        # time system identifier: 'Blank defaults to GPS' (rinex303.txt Table A2 p.60,
+        # rinex305.txt Table A2 p.58); a version without the field has GPS fields (round 32)
+        body = body[:24] + body[27:]
     from decimal import Decimal
     toks = []
     for t in _TOKRE.findall(body):
@@ -126,7 +131,42 @@ def _canonical_diff(kind, a_bytes, b_bytes, rep):
     if kind == "obs":
         data_ok = not compare_obs(a_bytes, b_bytes, rep)
     elif kind == "nav":
-        data_ok = not compare_nav(a_bytes, [b_bytes], rep)
+        # the same records with the same values (round 32: compare_nav would judge A' as a
+        # conversion from B's version and apply B -> A's value changes, e.g. the GLONASS tk
+        # basis, to A's values). Zero and blank are one value where neither says anything: a
+        # spare position RINEX 4 does not define (rinex305.txt section 6.4: spares hold no
+        # defined content), which a RINEX 4 leg leaves blank, and the 4.00/4.01 Klobuchar
+        # Region code, '0 or blank (wide area parameters)' (rinex_4.00.txt Table A32 p.104)
+        from decimal import Decimal
+        from tests.independent.compare import _KLOB, fields4, spares4, v4_message
+        v4 = float(a[0][:9]) >= 4
+
+        def norm(key, m, v):
+            v = list(v)
+            s, m0 = key[1][0], m.split(" ")[0]
+            zero = set()
+            if key[0] == "EPH":
+                msg = m0 or next(iter(v4_message(key[1], v)), "")
+                f = fields4("4.02", "EPH", s, msg)
+                if f is not None:
+                    pos = 0
+                    for line, n in enumerate(f):
+                        width = 3 if line == 0 else 4
+                        zero.update(range(pos + n, pos + width))
+                        pos += width
+                zero.update(spares4("4.02", "EPH", s, msg))      # spares a RINEX 4 leg leaves blank
+            elif key[0] == "EOP":
+                zero.update(spares4("4.02", "EOP", s, m0))
+            elif key[0] == "ION" and v4 and (s, m0) in _KLOB:
+                zero.add(8)
+            v = [None if k in zero and x == Decimal(0) else x for k, x in enumerate(v)]
+            while v and v[-1] is None:
+                v.pop()
+            return m, tuple(v)
+
+        def recs(x):
+            return {k: Counter(norm(k, m, v) for m, v in lst) for k, lst in nav_tokens(x).items()}
+        data_ok = recs(a) == recs(b)
     else:
         data_ok = not compare_met(a_bytes, b_bytes, rep)
     ha = [_norm_header_line(x) for x in a[:next(i for i, x in enumerate(a) if "END OF HEADER" in x)]]
@@ -218,11 +258,20 @@ def run(task):
     heavy = {targets[(k0 + 4 * j) % len(targets)] for j in range(3)} | {src_v}
     small = len(ld.container.payload) < 5_000_000
     identity = None
+    identity_tk = None
     if src_v in WRITE_VERSIONS:
         try:
-            identity = [o.data for o in convert_loaded(ld, os.path.basename(path), Options(
+            idouts = convert_loaded(ld, os.path.basename(path), Options(
                 target=src_v, nav=companions, assume_phase_aligned=True, crx=False,
-                compression="none"))]
+                compression="none"))
+            identity = [o.data for o in idouts]
+            if any(w["rule"] == "NAV.GLO.TK-DAY-BASIS" for w in idouts[0].report.warnings):
+                # GLONASS tk written as seconds of the day (an input off spec, reported): A -> A
+                # carries it, a round trip through RINEX 2 brings it back on the week basis, as
+                # --lenient writes it: the reference for those round trips (round 32)
+                identity_tk = [o.data for o in convert_loaded(ld, os.path.basename(path), Options(
+                    target=src_v, nav=companions, assume_phase_aligned=True, crx=False,
+                    compression="none", lenient=True))]
         except Exception:
             identity = None
     for target in targets:
@@ -250,6 +299,9 @@ def run(task):
                 probs = compare_obs(inp, outs[0].data, rep, tin=tin)
             elif kind == "nav":
                 probs = compare_nav(inp, [o.data for o in outs], rep, rin=tin)
+                # the second, separate nav check (round 32): fields by name, with its own layouts
+                # and the spec's transformations between versions (tests/independent/navfields.py)
+                probs += ["navfields: " + p for p in compare_nav_fields(inp, [o.data for o in outs])[:5]]
             else:
                 probs = compare_met(inp, outs[0].data, rep, tin=tin)
             rec["token_problems"] = probs[:5]
@@ -285,13 +337,31 @@ def run(task):
                         bdata = head + sep + body
                         rec["roundtrip_note"] = (rec.get("roundtrip_note", "") + f" {label.decode()} added by "
                                                  "A->B (reported assumption)").strip()
+                # B -> A runs with --assume-phase-aligned (as every leg here does): a source of
+                # unknown alignment (no SYS / PHASE SHIFT, e.g. HRAG00ZAF 3.02) comes back with the
+                # aligned form that override asserts, reported as an override assumption. That
+                # record is information the user's assertion added, not a changed value; the
+                # data are still compared in full (round 40: 3.02 has its three-state record now)
+                if (b"SYS / PHASE SHIFT" not in ident_head and any(
+                        a["category"] == "phase-alignment" and str(a["source"]).startswith("override")
+                        for a in back[0].report.to_dict()["assumptions"])):
+                    head, sep, body = bdata.partition(b"END OF HEADER")
+                    head = b"".join(x for x in head.splitlines(True) if not x.rstrip().endswith(b"SYS / PHASE SHIFT"))
+                    bdata = head + sep + body
+                    rec["roundtrip_note"] = (rec.get("roundtrip_note", "") + " SYS / PHASE SHIFT added by B->A "
+                                             "(--assume-phase-aligned, reported)").strip()
                 if back[0].report.losses:
                     rec["roundtrip"] = "lossy-return"     # B cannot go back without loss (reported)
                 elif [bdata] + [o.data for o in back[1:]] == identity:
                     rec["roundtrip"] = "ok"
+                elif identity_tk is not None and target < "3" and [bdata] + [o.data for o in back[1:]] == identity_tk:
+                    rec["roundtrip"] = "ok"
+                    rec["roundtrip_note"] = (rec.get("roundtrip_note", "") + " GLONASS tk on the day basis in the "
+                                             "input came back on the week basis (NAV.GLO.TK-DAY-BASIS)").strip()
                 else:
+                    ref = identity_tk if identity_tk is not None and target < "3" else identity
                     rec["roundtrip"], rec["roundtrip_header"] = _canonical_diff(
-                        kind, identity[0], bdata, back[0].report.to_dict())
+                        kind, ref[0], bdata, back[0].report.to_dict())
         except Exception as e:  # a crash is a bug: record it
             rec["outcome"] = "CRASH"
             rec["message"] = f"{type(e).__name__}: {e}"[:400]

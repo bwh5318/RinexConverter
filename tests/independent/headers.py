@@ -21,9 +21,38 @@ specs/text/*.txt (cited below), not from rinexcore/spec or rinexconv.
 
 import copy
 import datetime
+import json
+import os
 import re
 from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
+
+# the user-confirmed RINEX 2 <-> 3 code policies, written from docs/DECISIONS.md (not from the
+# converter): v2 -> v3 default attributes and the 3 -> 2 collapse priority
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "attribute_defaults.json"), "rb") as _fh:
+    ATTR_DEFAULTS = json.loads(_fh.read().decode("utf-8"))
+# the 3.02-3.05 phase correction tables, transcribed from docs/PHASE_ALIGNMENT.md (--align-phases)
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "phase_shift_tables.json"), "rb") as _fh:
+    PHASE_TABLES = json.loads(_fh.read().decode("utf-8"))
+
+
+def table_shift(version, sysc, code):
+    """Cycles to add to a phase of `code` for the `version` table (0 for 'R' and 'None'), or
+    None when the table gives no number."""
+    v = PHASE_TABLES.get(version, {}).get(sysc, {}).get(code)
+    if v is None:
+        return None
+    if v in ("R", "0"):
+        return Decimal(0)
+    num, den = v.split("/")
+    return (Decimal(num) / Decimal(den)).normalize()
+
+
+def align_systems(report):
+    """Systems the report says --align-phases shifted (assumption phase-alignment, source
+    'user:--align-phases ...')."""
+    return {x["detail"] for x in report.get("assumptions", []) or []
+            if x.get("category") == "phase-alignment" and str(x.get("source", "")).startswith("user:--align-phases")}
 
 # ---------------------------------------------------------------------------
 # Which header records each version defines (written from the spec header tables)
@@ -263,13 +292,28 @@ def _bds_count(f):
     return not f[4] and f[0] is not None and 0 < f[0] < 14
 
 
-def _to_gps(f):
+def _zero_known(version, beidou):
+    """A 0 is a value only in BeiDou terms of a 3.03-3.05 record: there the fields after the
+    count are "(BNK)" (Blank if Not Known), a BeiDou day is 0-6 and BDT-UTC was 0 s in
+    2006-2008 (rinex303.txt p.60, rinex304.txt p.65, rinex305.txt Table A2 p.65); 3.01/3.02 say
+    "Zero or blank if not known" (rinex302.txt Table A2 p.55, Table A5 p.63); in GPS terms a 0
+    is no GNSS-era value (GPS-UTC >= 1 s since 1981, days 1-7). Sol round 29."""
+    return bool(beidou) and "3.03" <= version < "4"
+
+
+def _to_gps(f, zero_known=False):
     """Fields [cur, fut, week, day, id] of a BeiDou record in GPS terms: + 14 s, week + 1356,
-    day + 1; a field that is 0 or blank is "not known" (rinex302.txt Table A5 p.63) and stays
-    as written, and a day goes with its week (Sol round 28)."""
-    k = lambda x: x is not None and x != 0
+    day + 1 (BeiDou 0-6, GPS 1-7); a field that is not known (blank, or 0 unless zero_known)
+    stays as written. Each field is optional on its own (rinex305.txt Table A5 "(BNK)"), so a
+    day converts without its week (Sol round 30)."""
+    k = lambda x: x is not None and (zero_known or x != 0)
     return [f[0] + 14 if k(f[0]) else f[0], f[1] + 14 if k(f[1]) else f[1],
-            f[2] + 1356 if k(f[2]) else f[2], f[3] + 1 if k(f[2]) and f[3] is not None else f[3]] + list(f[4:5])
+            f[2] + 1356 if k(f[2]) else f[2], f[3] + 1 if k(f[3]) else f[3]] + list(f[4:5])
+
+
+def _known4(f, zero_known):
+    """The four fields with those not known as None, each on its own."""
+    return [x if x is not None and (zero_known or x != 0) else None for x in f[:4]]
 
 
 def check_leap(cin, cout, sv, tv, report, where="LEAP SECONDS", basis=None, out_basis=None):
@@ -291,29 +335,42 @@ def check_leap(cin, cout, sv, tv, report, where="LEAP SECONDS", basis=None, out_
     if b[4] in _BEIDOU_LEAP and not ("3.03" <= tv < "4"):
         # 'only GPS' in RINEX 4 (rinex_4.02.txt Tables A2/A7), no identifier before 3.03
         p.append(f"{where}: time system {b[4]!r} in the output, RINEX {tv} cannot name it")
+    za, zb = _zero_known(sv, a_bds), _zero_known(tv, b_bds)
     if a_bds and b_bds:
         # both in BeiDou terms; either spelling is BeiDou, the target's is written (the
         # validator checks which)
         if a[4] in _BEIDOU_LEAP and b[4] in _BEIDOU_LEAP:
             b[4] = a[4]
     elif b_bds:
-        b = _to_gps(b)
+        b, zb = _to_gps(b, zb), False
     if a_bds and not b_bds:
         # 'only GPS and BDT are valid identifiers' in 3.03-3.05; RINEX 4 'only GPS', earlier
         # versions none (GPS fields): BDT counts from 1-Jan-2006 = GPS week 1356, 14 s behind
         # GPS (dtLS_BDS = dtLS - 14 s), days 0-6 against GPS 1-7 (rinex305.txt Table A2/A5,
         # rinex_4.02.txt l.871, l.943, Tables A2/A7)
-        a = _to_gps(a)[:4] + ["GPS"]
+        a, za = _to_gps(a, za)[:4] + ["GPS"], False
         cin = "".join(" " * 6 if x is None else f"{x:6d}" for x in a[:4]) + "GPS"
         if b[4] not in ("GPS", "") and tv >= "4":
             p.append(f"{where}: time system {b[4]!r} in the output, RINEX {tv} allows only GPS")
-    if a[0] != b[0]:
+    # fields compared by what they say: "not known" (blank, or a 0 where that means not
+    # known, _zero_known) on both sides is equal (Sol round 29)
+    ka, kb = _known4(a, za), _known4(b, zb)
+    if ka[0] != kb[0]:
         p.append(f"{where}: current leap seconds {a[0]} in the input, {b[0]} in the output")
     w = _leap_width(tv)
     nf = {6: 1, 24: 4, 27: 5}[w]
-    for k in range(1, 5):
-        if k < nf and a[k] not in (None, "") and a[k] != b[k]:
+    for k in range(1, 4):
+        if k < nf and ka[k] is not None and ka[k] != kb[k]:
             p.append(f"{where}: field {k + 1} is {a[k]!r} in the input, {b[k]!r} in the output")
+        elif k < nf and ka[k] is None and kb[k] is not None:
+            p.append(f"{where}: field {k + 1} is not known in the input ({a[k]!r}), the output "
+                     f"writes {b[k]!r}")
+    # the identifier, where the target has it (3.03+): 'Blank defaults to GPS' (rinex303.txt
+    # Table A2 p.60, rinex305.txt Table A2 p.58, rinex_4.02.txt l.3689), unless the output's
+    # record is read in BeiDou terms (out_basis); round 32: '18 GPS' -> '18' was a false alarm
+    idb = b[4] or ("" if b_bds else "GPS")
+    if nf == 5 and a[4] not in (None, "") and a[4] != idb:
+        p.append(f"{where}: field 5 is {a[4]!r} in the input, {b[4]!r} in the output")
     # text beyond the target's columns: dropped (claim needed), carried unchanged (a validity
     # question for the validator, not a difference) or changed (a difference)
     tail_in, tail_out = cin.ljust(60)[w:60], cout.ljust(60)[w:60]
@@ -408,7 +465,7 @@ def parse_obs(payload, count=False):
             t = None
             if l[2:29].strip():
                 sec = Decimal(l[18:29].strip())
-                if l[57:62].strip():
+                if v >= "4.02" and l[57:62].strip():          # 4.02 only (Table A3)
                     sec += Decimal(int(l[57:62])).scaleb(-12)
                 t = (int(l[2:6]), int(l[7:9]), int(l[10:12]), int(l[13:15]), int(l[16:18]), sec.normalize())
             clock = _dec(l[41:56])
@@ -520,31 +577,45 @@ def _epoch_checks(a, b, report, tv, type_emptied=None):
     if n_sub != c_sub:
         p.append(f"{n_sub} epochs have digits below 0.1 us that RINEX {tv} cannot hold, report "
                  f"claims {c_sub} epoch-precision")
-    # receiver clock offsets: equal, or rounded to 1e-9 s for RINEX 2 (F12.9 vs F15.12)
+    # receiver clock offsets: equal, or rounded to 1e-9 s for RINEX 2 (F12.9 vs F15.12). The
+    # EPOCH record of an event (flags 2-5) holds one too (rinex305.txt Table A3 p.59: one
+    # record for every flag; rinex211.txt Table A2), paired in order (round 32: it vanished
+    # unclaimed and was never compared)
     byk_in = defaultdict(list)
     for e in kept:
         byk_in[(key(e.time), e.flag)].append(e)
     byk_out = defaultdict(list)
     for e in data_out:
         byk_out[(key(e.time), e.flag)].append(e)
+    pairs = [(k, ei, eo) for k, lst in byk_in.items() for ei, eo in zip(lst, byk_out.get(k, []))]
+    pairs += [((key(ei.time), ei.flag), ei, eo) for ei, eo in event_pairs(a, b, tv)[0]]
     rounded = lost_clock = cand = 0
     bad = []
     q9 = Decimal("1e-9")
-    for k, lst in byk_in.items():
-        for ei, eo in zip(lst, byk_out.get(k, [])):
-            ci, co = ei.clock, eo.clock
-            if ci is not None and tv < "3" and ci != ci.quantize(q9):
-                cand += 1
-            if ci is None and co is None or ci is not None and co is not None and ci == co:
-                continue
-            if ci is None:
-                bad.append(f"epoch {k}: output has receiver clock {co}, the input has none")
-            elif co is None:
-                lost_clock += 1
-            elif tv < "3" and co == co.quantize(q9) and abs(ci - co) <= Decimal("0.5e-9"):
-                rounded += 1
-            else:
-                bad.append(f"epoch {k}: receiver clock {ci} in the input, {co} in the output")
+
+    def fits(c):
+        """The clock has a form in the target's field: F12.9 (rounded to 1e-9 s) in RINEX 2,
+        F15.12 in 3.x/4.x; a leading zero may be dropped. RINEX 2 also takes the value with its
+        own digits when they fit the 12 columns (' 123.4567890': readable, not F12.9; round 32)."""
+        w, d = (12, 9) if tv < "3" else (15, 12)
+        texts = [f"{c.quantize(Decimal(1).scaleb(-d)):.{d}f}"] + ([f"{c:f}"] if tv < "3" else [])
+        return any(len(s.replace("0.", ".", 1) if s.startswith(("0.", "-0.")) else s) <= w for s in texts)
+    for k, ei, eo in pairs:
+        ci, co = ei.clock, eo.clock
+        if ci is not None and tv < "3" and ci != ci.quantize(q9):
+            cand += 1
+        if ci is None and co is None or ci is not None and co is not None and ci == co:
+            continue
+        if ci is None:
+            bad.append(f"epoch {k}: output has receiver clock {co}, the input has none")
+        elif co is None:
+            lost_clock += 1
+            if fits(ci):
+                bad.append(f"epoch {k}: receiver clock {ci} dropped although RINEX {tv} can hold it")
+        elif tv < "3" and co == co.quantize(q9) and abs(ci - co) <= Decimal("0.5e-9"):
+            rounded += 1
+        else:
+            bad.append(f"epoch {k}: receiver clock {ci} in the input, {co} in the output")
     if bad:
         p.append(f"{len(bad)} receiver clock offsets changed: {bad[:3]}")
     c_prec = _count(report, "clock-precision")
@@ -775,10 +846,9 @@ def phase_entries(recs):
         if c[0] != " ":
             code = _phase_code(c[2:5])
             v = c[6:14].strip()
-            try:
-                val = Decimal(v).normalize() if v else None
-            except InvalidOperation:
-                val = v
+            # F8.5: plain digits only ('Infinity', 'NaN' and 'sNaN' are no value: kept as text,
+            # an unreadable entry; Astra round 39)
+            val = (Decimal(v).normalize() if re.fullmatch(r"[+-]?(?:\d+\.?\d*|\.\d+)", v) else v) if v else None
             out.append([c[0], code, val, c[18:60].split()])
         elif out:
             out[-1][3].extend(c[18:60].split())
@@ -823,6 +893,29 @@ def phase_compare(ein, eout, sv, tv, out_codes, report, where, header=True, out_
             p.append(f"{where}: output writes SYS / PHASE SHIFT, which a RINEX {sv} -> {tv} "
                      "conversion leaves out")
         return p
+    aligned = align_systems(report)
+    if header and aligned:
+        # --align-phases (PLAN 3.3 rule 2): the corrections applied, from the target's table,
+        # for all satellites; a system with no shifted signal gets the 'only reference
+        # signals' form, the code alone (rinex302.txt section 9.1 p.41, rinex305.txt 5.2.12)
+        for s in sorted(aligned):
+            codes = (out_codes or {}).get(s, [])
+            sh = {c: table_shift(tv, s, c) for c in codes}
+            if any(d is None for d in sh.values()):
+                p.append(f"{where}: --align-phases for {s} with phase types the RINEX {tv} table gives no "
+                         f"value for: {[c for c, d in sh.items() if d is None]}")
+                continue
+            moved = [(s, c, d, ()) for c, d in sh.items() if d != 0]
+            want = Counter(moved or [(s, c, None, ()) for c in codes])
+            got = Counter(e for e in eout if e[0] == s)
+            if want != got:
+                p.append(f"{where}: SYS / PHASE SHIFT of {s} after --align-phases {list(got.elements())} "
+                         f"is not the RINEX {tv} table's {list(want.elements())}")
+        ein = [e for e in ein if e[0] not in aligned]
+        eout = [e for e in eout if e[0] not in aligned]
+        out_codes = {s: c for s, c in (out_codes or {}).items() if s not in aligned}
+        if out_systems is not None:
+            out_systems = {s for s in out_systems if s not in aligned}
     if header and (sv < "3.01" or (sv >= "4" and tv < "4")):
         assumed = {x["detail"] for x in report.get("assumptions", []) or []
                    if x["category"] == "phase-alignment" and "assume-phase-aligned" in x.get("source", "")}
@@ -851,6 +944,24 @@ def phase_compare(ein, eout, sv, tv, out_codes, report, where, header=True, out_
             p.append(f"{where}: no SYS / PHASE SHIFT for {bare}, which have phase types")
         return p
     vin, vout = sv, tv
+    systems = out_codes if out_systems is None else out_systems
+    if (sv == "3.01" and "3.02" <= tv < "4") or ("3.02" <= sv < "4" and tv == "3.01"):
+        # a 3.01 entry with a code and no value records no correction ('none, or not known':
+        # rinex301.txt section 9.1 p.24-25); from 3.02 a code alone reads 'only reference
+        # signals', aligned (rinex302.txt section 9.1 p.41), so it may not be carried either
+        # way: each one is dropped (claimed phase-shift-entry-dropped), and a system left with
+        # no coded entry must have the blank form, the system alone (3.01: 'none affected, or
+        # not known'; 3.02+: unknown; PLAN section 3.3 rule 1; round 32)
+        bare = [e for e in ein if e[1] and e[2] is None]
+        keep = [e for e in ein if not (e[1] and e[2] is None)]
+        for s in sorted({e[0] for e in bare}):
+            if s in systems and dropped is not None:
+                for e in bare:
+                    if e[0] == s:
+                        dropped[(s, e[1])] += 1
+            if not any(e[0] == s for e in keep):
+                keep.append((s, "", None, ()))
+        ein = keep
 
     def cls(vk, s, code):
         return signal_class(vk, s, code, exact=True) if code else ""
@@ -1057,19 +1168,38 @@ def output_systems(b):
     return out
 
 
-def phase_claims(ein, sv, tv, out_systems, dropped, report):
+def _type_lists(f):
+    """{sys: set of codes} over every SYS / # / OBS TYPES list of a RINEX 3/4 file."""
+    out = defaultdict(set)
+    cur = None
+    for lab, c in [(lab, c) for lab, c, ln in f.header] + [x for e in f.epochs if 2 <= e.flag <= 5 for x in e.recs]:
+        if lab == "SYS / # / OBS TYPES":
+            if c[:1].strip():
+                cur = c[0]
+            out[cur].update(_type_codes(c))
+    return out
+
+
+def phase_claims(ein, sv, tv, out_systems, dropped, report, undone=None):
     """The SYS / PHASE SHIFT losses, counted exactly (Sol round 13: a deleted claim, or a count
     of 999, passed). The header record has no room in 2.x / 3.00 (it exists from 3.01,
     rinex301.txt §9.1): one phase-shift-record-not-representable per entry when any entry
     names a code. From RINEX 3 to 4 it is strongly deprecated (rinex_4.00.txt Table A2 p.61):
-    one phase-shift-record-deprecated per entry of an output system when any entry has a
-    value. Entries left out elsewhere (header and events, `dropped`) are one
+    one phase-shift-record-deprecated per entry of an output system when any entry names a
+    code (a value, the zero form, or from 3.02 a code alone: 'only reference signals',
+    rinex302.txt section 9.1 p.41; only the system-only form says nothing: round 32). Entries
+    left out elsewhere (header and events, `dropped`) are one
     phase-shift-entry-dropped:<sys>:<code> each."""
     p = []
     want = {"phase-shift-record-not-representable": 0, "phase-shift-record-deprecated": 0}
     if tv < "3.01" and any(e[1] for e in ein):
         want["phase-shift-record-not-representable"] = len(ein)
-    elif tv >= "4" and sv < "4" and any(e[2] is not None for e in ein):
+        if undone is not None:
+            # --align-phases to 3.00: an entry whose correction changed a value the output keeps
+            # is in the data now (counted by compare_obs from the input's own values); the
+            # others are lost (Astra round 39: counted by code column before)
+            want["phase-shift-record-not-representable"] -= undone
+    elif tv >= "4" and sv < "4" and any(e[1] for e in ein):
         want["phase-shift-record-deprecated"] = len([e for e in ein if e[0] in out_systems])
     for cat, n in want.items():
         c = _count(report, cat)
@@ -1455,7 +1585,204 @@ def _foreign_records(a, b, tv, report):
     return p
 
 
-def compare_obs_meta(inp, out, report, type_emptied=None):
+_WL = "WAVELENGTH FACT L1/2"
+
+
+def _wl_state(contents):
+    """The wavelength factors in force after these WAVELENGTH FACT L1/2 records (rinex211.txt
+    Table A1: 2I6 factors for L1 and L2 (1 full cycle, 2 half cycle, L2 0 single frequency),
+    I6 number of satellites (0 or blank: the default for all), 7(3X,A1,I2) satellites):
+    {'*': (f1, f2), satellite: (f1, f2)}; full cycles where no record says otherwise."""
+    st = {"*": (1, 1)}
+    for c in contents:
+        c = c.ljust(60)
+        f1, f2, n = _int(c[0:6]), _int(c[6:12]), _int(c[12:18]) or 0
+        f = (1 if f1 is None else f1, 0 if f2 is None else f2)
+        if not n:
+            st["*"] = f
+            continue
+        for k in range(min(n, 7)):
+            it = c[21 + 6 * k:24 + 6 * k]
+            if it.strip():
+                num = _int(it[1:3])
+                st[(it[0] if it[0] != " " else "G") + ("%02d" % num if num is not None else it[1:3])] = f
+    return st
+
+
+def _wavelength_checks(a, b, tv):
+    """WAVELENGTH FACT L1/2 changes the meaning of every RINEX 2 L1/L2 value and of LLI bit 1
+    (rinex211.txt Tables A1/A2), so (round 32: a changed or deleted record passed):
+      - RINEX 2 -> 2: the header's factors (default and per satellite) must be the input's
+        (the records of events are compared in _event_checks);
+      - RINEX 3/4 -> 2: RINEX 3/4 store half-wavelength phases in full cycles and flag a
+        half-cycle ambiguity in LLI bit 1 (rinex300.txt section 5.4 p.12), so the output must
+        say full cycles for L1 and L2 (1 1) and nothing else; the record is mandatory in 2.10
+        (rinex210.txt Table A1, no '*');
+      - RINEX 2 -> 3/4: no such record in the output (its effect is LLI bit 1, which the
+        token comparison checks);
+      - RINEX 3/4 -> 3/4: a file's own non-standard record is carried as written."""
+    p = []
+    sv = a.version
+    win = [c for lab, c, ln in a.header if lab == _WL]
+    wout = [c for lab, c, ln in b.header if lab == _WL]
+    if tv >= "3":
+        if sv < "3" and wout:
+            p.append(f"RINEX {tv} output keeps {_WL}, which RINEX 3/4 do not define (its effect is LLI bit 1)")
+        elif sv >= "3" and Counter(norm(_WL, c) for c in win) != Counter(norm(_WL, c) for c in wout):
+            p.append(f"header {_WL} not carried as written: {[c.rstrip() for c in win]} -> "
+                     f"{[c.rstrip() for c in wout]}")
+        return p
+    if sv < "3":
+        if _wl_state(win) != _wl_state(wout):
+            p.append(f"header {_WL}: factors {_wl_state(win)} in the input, {_wl_state(wout)} in the output")
+    else:
+        if set(_wl_state(wout).values()) != {(1, 1)}:
+            p.append(f"header {_WL} {[c.rstrip() for c in wout]}: RINEX {sv} phases are in full cycles, "
+                     "so the RINEX 2 output must give factors 1 1")
+        if tv == "2.10" and not wout:
+            p.append(f"RINEX 2.10 output has no {_WL} (mandatory in 2.10)")
+    return p
+
+
+def _v2v3_attributes(a, b, tv, report):
+    """RINEX 2 -> 3/4: a RINEX 2 code names no tracking mode, so every attribute of the output
+    is an assumption the report states (obs-code-attribute:<sys>, '<v2>-><v3>'). Each output
+    code of a type list (header and events) must be one an assumption names, and each
+    assumption must be a code the target defines (code_validity.json) of the v2 code's signal
+    class (code_expectations.json: same type and band, the same C/A, P or L2C family for
+    GPS/GLONASS pseudoranges; an --overrides choice is the user's) for a code the input
+    lists (round 32: L2W renamed L2C, C1W renamed C1P in the output passed). An assumption
+    from the built-in table (source 'table') must also be the user-confirmed default of
+    attribute_defaults.json, and one from the L2C receiver rule (source
+    'receiver-rule:L2-follows-code') that rule's attribute, for an input with C2 and no P2
+    (verify round: L2->L2C written in both the output and the report passed)."""
+    from . import codes as _codes
+    from .tokens import signal_class
+    p = []
+    if not (a.version < "3" <= tv):
+        return p
+    svk, tvk = "%.2f" % float(a.version), "%.2f" % float(tv)
+    v2codes = set()
+    lists = []
+    for lab, c in [(lab, c) for lab, c, ln in a.header] + [x for e in a.epochs for x in e.recs]:
+        if lab == "# / TYPES OF OBSERV":
+            v2codes.update(c[6:60].split())
+            if c[:6].strip():
+                lists.append([])
+            if lists:
+                lists[-1] += c[6:60].split()
+    named = defaultdict(set)
+    for x in report.get("assumptions", []) or []:
+        cat = x.get("category") or ""
+        if not cat.startswith("obs-code-attribute:"):
+            continue
+        s = cat.split(":", 1)[1]
+        v2, _, v3 = (x.get("detail") or "").partition("->")
+        named[s].add(v3)
+        if v2 not in v2codes:
+            p.append(f"assumption obs-code-attribute:{s} {v2}->{v3} names a code the input does not list")
+        src = x.get("source")
+        if src == "override":
+            continue
+        if src == "table":
+            want = ATTR_DEFAULTS["v2_to_v3"].get(s, {}).get(v2)
+            if want is not None and v3 != want:
+                p.append(f"assumption obs-code-attribute:{s} {v2}->{v3} (source table): the confirmed "
+                         f"default is {v2}->{want} (docs/DECISIONS.md)")
+        elif src == "receiver-rule:L2-follows-code":
+            attr = ATTR_DEFAULTS["l2_follows_code"].get(s)
+            if attr is None or v2[1:] != "2" or v2[0] not in "LDS" or v3 != v2[0] + "2" + attr:
+                p.append(f"assumption obs-code-attribute:{s} {v2}->{v3} (L2C receiver rule): the rule "
+                         f"gives {v2[0]}2{attr or '?'} for GPS/GLONASS L2/D2/S2 only")
+            elif not any("C2" in lst and "P2" not in lst for lst in lists):
+                p.append(f"assumption obs-code-attribute:{s} {v2}->{v3}: the L2C receiver rule needs a "
+                         "type list with C2 and without P2")
+        else:
+            p.append(f"assumption obs-code-attribute:{s} {v2}->{v3}: unknown source {src!r}")
+        if not _codes.valid(tv, s, v3) or signal_class(svk, s, v2) != signal_class(tvk, s, v3):
+            p.append(f"assumption obs-code-attribute:{s} {v2}->{v3}: not a RINEX {tv} code of the "
+                     f"signal {signal_class(svk, s, v2)}")
+    cur = None
+    for lab, c in [(lab, c) for lab, c, ln in b.header] + [x for e in b.epochs for x in e.recs]:
+        if lab != "SYS / # / OBS TYPES":
+            continue
+        if c[:1].strip():
+            cur = c[0]
+        for code in _type_codes(c):
+            if code not in named.get(cur, ()):
+                p.append(f"output type {cur} {code} is named by no obs-code-attribute:{cur} assumption "
+                         f"(the RINEX 2 input gives no attribute)")
+    return p
+
+
+def _event_counts(a, b, report, tv):
+    """# OF SATELLITES and PRN / # OF OBS inside events (flag 4 'header information follows',
+    rinex305.txt section 6.5; often a teqc/gfzrnx file's counts at its end) are checked as the
+    header's are (round 32: a changed count or a dropped line passed): kept where the input
+    event has them, describing the output's own data (_obs_output_consistency), and in the
+    input, either agreeing with the input's data or repaired (HDR.COUNTS)."""
+    p = []
+    labels = ("# OF SATELLITES", "PRN / # OF OBS")
+    sats = {s for e in b.epochs if e.flag in (0, 1, 6) for s in e.sats}
+    sats_in = {s for e in a.epochs if e.flag in (0, 1, 6) for s in e.sats}
+    repaired = any((r.get("rule") or "") == "HDR.COUNTS" for r in report.get("repairs", []) or [])
+    pairs, emptied, extra = event_pairs(a, b, tv)
+    for ei, eo in pairs + [(None, eo) for eo in extra]:
+        where = f"event at {(ei or eo).time}"
+        if ei is not None:
+            for f in labels:
+                if any(lab == f for lab, c in ei.recs) and not any(lab == f for lab, c in eo.recs) \
+                        and (f == labels[0] or sats):
+                    p.append(f"{where} (input line {ei.line}): {f} dropped")
+            n_in = [c for lab, c in ei.recs if lab == labels[0]]
+            r_in = [c for lab, c in ei.recs if lab == labels[1]]
+            wrong = bool(n_in) and _int(n_in[0][:6]) != len(sats_in)
+            if r_in and not wrong:
+                listed = {(c[3] if c[3] != " " else a.single) + "%02d" % int(c[4:6]) for c in r_in
+                          if c[3:6].strip()}
+                wrong = listed != sats_in or (a.counts is not None and not a.types_changed
+                                              and bool(_check_prn_counts(r_in, a)))
+            if wrong and not repaired:
+                p.append(f"{where} (input line {ei.line}): the input's {' / '.join(labels)} disagree with "
+                         "its data, and no HDR.COUNTS repair is reported")
+        r = [c for lab, c in eo.recs if lab == labels[0]]
+        if r and _int(r[0][:6]) != len(sats):
+            p.append(f"{where}: output # OF SATELLITES {r[0][:6].strip()} but the output data hold "
+                     f"{len(sats)} satellites")
+        r = [c for lab, c in eo.recs if lab == labels[1]]
+        if r:
+            listed = {(c[3] if c[3] != " " else b.single) + "%02d" % int(c[4:6]) for c in r if c[3:6].strip()}
+            if listed != sats:
+                p.append(f"{where}: output PRN / # OF OBS lists {len(listed)} satellites, the output data "
+                         f"hold {len(sats)} (differ: {sorted(listed ^ sats)[:5]})")
+            if b.counts is not None and not b.types_changed:
+                p += [f"{where}: {x}" for x in _check_prn_counts(r, b)]
+    return p
+
+
+def _obs_scale_v2(a, b, tv):
+    """A RINEX 2 OBS SCALE FACTOR (the unofficial 2.20 record SYS / SCALE FACTOR replaced:
+    rinex300.txt section 5.5) means 'divide the stored values by this'. RINEX 3/4 do not define
+    it, so in a RINEX 3/4 output it would be read as a plain record and the values taken as
+    they stand (round 32: carried verbatim, values 10x too large); there the factor must be a
+    SYS / SCALE FACTOR, which the token comparison checks value by value (tokens.py divides
+    by both). Returns (problems, the input without those records, for the record checks
+    after: header and events)."""
+    p = []
+    lab = "OBS SCALE FACTOR"
+    if not (a.version < "3" <= tv):
+        return p, a
+    if any(x == lab for x, c, ln in b.header) or any(x == lab for e in b.epochs for x, c in e.recs):
+        p.append(f"RINEX {tv} output keeps {lab}, which RINEX 3/4 do not define (a SYS / SCALE FACTOR "
+                 "must carry the factor)")
+    g = copy.copy(a)
+    g.header = [h for h in a.header if h[0] != lab]
+    g.epochs = [ObsEpoch(e.time, e.flag, e.sats, e.clock, [x for x in e.recs if x[0] != lab], e.line)
+                if 2 <= e.flag <= 5 else e for e in a.epochs]
+    return p, g
+
+
+def compare_obs_meta(inp, out, report, type_emptied=None, unalign_undone=None):
     """Receiver clocks, epochs, events and header records of an observation conversion."""
     a, b = parse_obs(inp, count=True), parse_obs(out, count=True)
     tv = report.get("target_version") or b.version
@@ -1470,6 +1797,8 @@ def compare_obs_meta(inp, out, report, type_emptied=None):
     # target's generated records only)
     a, b = _without_foreign(a, a.version), (_without_foreign(b, a.version) if a.version == tv else b)
     q, a = _sys_records(a, b, tv, report)
+    p += q
+    q, a = _obs_scale_v2(a, b, tv)
     p += q
     p += _epoch_checks(a, b, report, tv, type_emptied)
     dropped = Counter()                   # (sys, code) of SYS / PHASE SHIFT entries left out
@@ -1492,12 +1821,15 @@ def compare_obs_meta(inp, out, report, type_emptied=None):
     p += phase_compare(ein, phase_entries([(lab, c) for lab, c, ln in b.header]), a.version, tv,
                        output_phase_codes(b) if tv >= "3" else {}, report, "header",
                        out_systems=out_sys, dropped=dropped)
-    p += phase_claims(ein, a.version, tv, out_sys, dropped, report)
+    p += phase_claims(ein, a.version, tv, out_sys, dropped, report, unalign_undone)
     p += _phasecenter_checks(a, b, tv, report)
     p += glonass_claims(a, b, tv, report)
     for f in {_family(lab) for lab, c, ln in a.header} & OBS_REGEN:
         p += _obs_regenerated(f, a, b, report, tv, repaired)
     p += _obs_output_consistency(a, b, report, tv)
+    p += _wavelength_checks(a, b, tv)
+    p += _v2v3_attributes(a, b, tv, report)
+    p += _event_counts(a, b, report, tv)
     if not b.recs("PGM / RUN BY / DATE"):
         p.append("output has no PGM / RUN BY / DATE")
     # LEAP SECONDS inside events (flag 4 may carry any header record): the same field rules as
@@ -1598,7 +1930,12 @@ def nav_corrections(payload):
                                    prec={"a0": 12, "a1": 12}, label=lab))
             elif lab == "CORR TO SYSTEM TIME" and not v3_content(c):
                 code = "GLUT" if ftype == "G" or (v >= "3" and L[0][40:41] == "R") else "SBUT"
-                items.append(_item("STO", code, f"{lab} (line {ln})", a0=_dec(c[21:40]),
+                a0 = _dec(c[21:40])
+                if v == "2.00" and ftype == "G" and a0 is not None:
+                    # 2.00 GLONASS files store +TauC, later versions -TauC (rinex210.txt
+                    # l.171-180, section 8.2): read in the later versions' terms
+                    a0 = -a0
+                items.append(_item("STO", code, f"{lab} (line {ln})", a0=a0,
                                    ref=(_int(c[0:6]), _int(c[6:12]), _int(c[12:18])), has={"a0"},
                                    prec={"a0": 12}, label=lab))
             elif lab == "D-UTC A0,A1,T,W,S,U":
@@ -1663,7 +2000,13 @@ def nav_corrections(payload):
                     T, W = _int(c[38:45]), _int(c[45:50])
                 # U, the UTC identifier: 1X,A5,1X,I2 after W (rinex305.txt Table A5); a record
                 # with a0 and a1 only (BOR100POL SN) has no reference time
-                items.append(_item("STO", code, f"{lab} {code} (line {ln})", a0=a0, a1=a1, T=T, W=W,
+                if code[:2] == "BD" and v < "3.03" and isinstance(T, int) and isinstance(W, int) and (T or W):
+                    # 3.02 counts the reference in GPS weeks and seconds ('W Reference week number
+                    # (GPS/GAL week ...)', rinex302.txt Table A5 p.63), 3.03+ in BDS ones
+                    # (rinex303.txt p.70, rinex305.txt Table A5 p.67): held here in BDS terms
+                    W, T = _gps_to_bdt(W, T)
+                items.append(_item("STO", code, f"{lab} {code} (line {ln})", a0=a0, a1=a1, T=T, W=W, woff=bool(off),
+                                   ver=v,
                                    utc=None if off else _int(c[57:59]), sat="" if off else c[51:56].strip(),
                                    has={"a0", "a1"} | ({"TW"} if T is not None or W is not None else set()),
                                    prec={"a0": 10, "a1": 9}, label="TIME SYSTEM CORR"))
@@ -1721,6 +2064,9 @@ def nav_corrections(payload):
             # E IFNV), A37 (BDGIM: C CNVX), A38 (NavIC L1NV KLOB)
             if (msg == "LNAV" and sysc in "GJI") or (msg == "D1D2" and sysc == "C") or (
                     msg == "CNVX" and sysc in "GJ"):
+                # the 4.00/4.01 Region code, ION MESSAGE LINE 2 field 2 (rinex_4.00.txt Table A32
+                # p.104): kept apart, compared where the record was written from a header set
+                region = vals[8] if len(vals) > 8 else None
                 vals = (vals + [None] * 8)[:8]
                 parts = {}
                 if any(x is not None for x in vals[:4]):
@@ -1728,7 +2074,7 @@ def nav_corrections(payload):
                 if any(x is not None for x in vals[4:8]):
                     parts["B"] = vals[4:8]
                 items.append(_item("ION", ("KLOB", sysc), src, parts=parts, prec=12, label="ION", sm=(sysc, msg),
-                                   ident=ident, epoch=t, prn=prn))
+                                   ident=ident, epoch=t, prn=prn, region=region, sub=sub, version=v))
             elif msg == "IFNV" and sysc == "E":
                 vals = (vals + [None] * 4)[:4]
                 items.append(_item("ION", ("NEQG", "E"), src, parts={"N": vals[:3]}, flags=vals[3],
@@ -1831,16 +2177,25 @@ def _match_sto(i, o):
 # 4=UTC(BIPM), 5=UTC(Europe Lab), 6=UTC(CRL), 7=UTC(NTSC)) of the RINEX 4 UTC IDs
 # (rinex_4.02.txt section 5.4.9, Table 27). Two are readings, not names: UTC(CRL) is the
 # former name of UTC(NICT) (the CRL became part of NICT in 2004), and UTCGAL, Galileo's UTC,
-# is taken as the "Europe Lab" entry. UTC(NPLI), UTCIRN and UTC(OP) have no number.
+# is taken as the "Europe Lab" entry. For SBAS, "Europe Lab" is UTC(OP), the only European lab
+# Table 27 lists for SBUT (the user's choice, 2026-11-01; `_utc_number`). UTC(NPLI) and UTCIRN
+# have no number, nor UTC(OP) in another record.
 V3_UTC_NUMBER = {"UTC(NIST)": 1, "UTC(USNO)": 2, "UTC(SU)": 3, "UTC(BIPM)": 4, "UTCGAL": 5,
                  "UTC(NICT)": 6, "UTC(NTSC)": 7}
+
+
+def _utc_number(code, ui):
+    """The RINEX 2/3 UTC number of a RINEX 4 UTC ID in a record of offset code `code`."""
+    if code == "SBUT" and ui == "UTC(OP)":
+        return 5
+    return V3_UTC_NUMBER.get(ui)
 
 
 _IDENT_CLAIMS = ("SBAS-ID:", "STO-SAT:", "DELTA-UTC:UTC-ID:", "D-UTC:UTC-ID:", "TIME SYSTEM CORR:UTC-ID:",
                  "ION-TTM:", "ION-SAT:")
 _CODE_SYS = {"GP": "G", "GL": "R", "GA": "E", "BD": "C", "QZ": "J", "IR": "I", "SB": "S"}
 # RINEX 3 UTC numbers as RINEX 4 UTC IDs (the reading of V3_UTC_NUMBER, the other way):
-# Galileo's 'Europe Lab' is UTCGAL; for another system no 4.02 ID names it
+# Galileo's 'Europe Lab' is UTCGAL and SBAS's UTC(OP); for another system no 4.02 ID names it
 _V4_UTC_NAME = {1: "UTC(NIST)", 2: "UTC(USNO)", 3: "UTC(SU)", 4: "UTC(BIPM)", 5: "UTC(Europe Lab)",
                 6: "UTC(NICT)", 7: "UTC(NTSC)"}
 
@@ -1896,6 +2251,12 @@ def _ion_fields(i, o, tv, lost):
     return p
 
 
+# The one UTC ID a 'UT' offset has: rinex_4.02.txt Table 27 p.43, rinex_4.01.txt Table 23 p.42,
+# rinex_4.00.txt Table 23 p.40 (the same five rows); IRUT and SBUT list several (none chosen)
+TABLE27_UTC_ID = {"GPUT": "UTC(USNO)", "GLUT": "UTC(SU)", "GAUT": "UTCGAL", "BDUT": "UTC(NTSC)",
+                  "QZUT": "UTC(NICT)"}
+
+
 def _sto_fields(it, o, lost, field_lost):
     """The identifier fields of a time correction written into another record type (one
     carried with its own label keeps them as written). RINEX 4 STO line 1 holds the
@@ -1928,7 +2289,12 @@ def _sto_fields(it, o, lost, field_lost):
             lost[f"SBAS-ID:{sbas}"] += 1
         want_utc = ""
         if code.endswith("UT") and isinstance(ui, int) and ui:
-            want_utc = "UTCGAL" if code == "GAUT" and ui == 5 else _V4_UTC_NAME.get(ui, "")
+            want_utc = ({"GAUT": "UTCGAL", "SBUT": "UTC(OP)"}.get(code) if ui == 5 else None) \
+                or _V4_UTC_NAME.get(ui, "")
+        if not want_utc and code in TABLE27_UTC_ID:
+            # 'A UTC ID is necessary, as detailed in Table 27, for every "UT" time offset
+            # message' (rinex_4.02.txt p.43), and the table names one for these codes
+            want_utc = TABLE27_UTC_ID[code]
         got = ((o.get("sat") or ""), (o.get("sbas") or ""), (o.get("utc") or ""))
         if got != (want_sat, want_sbas, want_utc):
             p.append(f"{it['src']}: STO satellite / SBAS ID / UTC ID {got} in the output, "
@@ -1945,7 +2311,7 @@ def _sto_fields(it, o, lost, field_lost):
         if (o.get("sat") or "") != want:
             p.append(f"{it['src']}: satellite/provider field {o.get('sat')!r} in the output, {want!r} expected")
         top, lab = (6, "D-UTC") if olab == "D-UTC A0,A1,T,W,S,U" else (7, "TIME SYSTEM CORR")
-        num = ui if isinstance(ui, int) else (V3_UTC_NUMBER.get(ui) if ui else 0)
+        num = ui if isinstance(ui, int) else (_utc_number(it["fam"], ui) if ui else 0)
         uo = o.get("utc") or 0
         if ui and (not num or num > top):
             lost[f"{lab}:UTC-ID:{ui}"] += 1
@@ -1968,12 +2334,10 @@ def _leap_gps(c, version, basis=None):
     if basis == "BDS" and _bds_count(a):
         a[4] = "BDT"
     if a[4] in _BEIDOU_LEAP:
-        a = _to_gps(a)
+        a = _to_gps(a, _zero_known(version, True))
     n = {6: 1, 24: 4, 27: 4}[_leap_width(version)]
-    # (only known fields are reconciled: 0 or blank is "not known"; a day with its week)
+    # (only known fields are reconciled, each on its own: in GPS terms 0 or blank is "not known")
     a = [x if x not in (None, 0) else None for x in a[:4]]
-    if a[2] is None:
-        a[3] = None
     return list(a[:n]) + [None] * (4 - n)
 
 
@@ -2075,13 +2439,188 @@ def _nav_systems(payload):
     return {l[0] for l in body if l[:1].isalpha() and l[1:3].strip().isdigit()}
 
 
-def compare_nav_meta(inp, outs, report, merged=None):
+def _first_eph(payloads):
+    """{system: first ephemeris epoch} of the inputs, and '*' the first of any system."""
+    from .tokens import lines_of, nav_tokens
+    first = {}
+    for pl in payloads:
+        for k in nav_tokens(lines_of(pl)):
+            if k[0] == "EPH":
+                for s in (k[1][0], "*"):
+                    if s not in first or k[2] < first[s]:
+                        first[s] = k[2]
+    return first
+
+
+# The message a RINEX 4 STO/ION record written from a RINEX 2/3 header correction names: the
+# legacy message of the system, the one that broadcasts these parameters (rinex_4.02.txt
+# Table 21 p.39-40: LNAV GPS/QZSS/NavIC, FDMA GLONASS, IFNV Galileo, D1D2 BeiDou, SBAS SBAS)
+_LEGACY_MSG = {"G": "LNAV", "J": "LNAV", "I": "LNAV", "R": "FDMA", "E": "IFNV", "C": "D1D2", "S": "SBAS"}
+
+
+def _sow(t, code):
+    """Seconds of week of a date-time in the code's week (BDS from 2006-01-01, else GPS)."""
+    w0 = datetime.date(2006, 1, 1) if code[:2] == "BD" else datetime.date(1980, 1, 6)
+    d = (datetime.date(*t[:3]) - w0).days
+    return (d % 7) * 86400 + t[3] * 3600 + t[4] * 60 + int(t[5])
+
+
+def _header_to_v4(it, o, tv, report, first_eph, q_area):
+    """A RINEX 4 STO/ION record written from a RINEX 2/3 header correction, against what the
+    report says was assumed for it (review round 32: the epoch, t_tm, message type and
+    satellite of such records were never compared). STO: the legacy message of the code's
+    system, t_tm the reference time T ('sto-transmission-time {code}:t_tm=T'; T from the
+    record, else the seconds of week of its reference date, else 0 'unknown'). ION: the legacy
+    message, the satellite the 3.02+ SV ID names (else none), the transmission epoch the
+    'ion-transmission-time' assumption names (the first ephemeris epoch of the system, of any
+    system without one, 1980-01-06 without any; a 3.02+ time mark A-X sets the hour on that
+    day), and in 4.00/4.01 the Region code: QZSS sets name no area in RINEX 2/3, so it is the
+    user's --qzss-ion-area or blank, which 4.00/4.01 read as wide area (rinex_4.00.txt Table
+    A32 p.104), each an assumption counted in q_area."""
+    p = []
+    sm = o.get("sm") or ("", "")
+    assumed = {(a["category"], a["detail"]) for a in report.get("assumptions", []) or []}
+    if it["kind"] == "STO":
+        code = it["fam"]
+        s = {"GP": "G", "GL": "R", "GA": "E", "BD": "C", "QZ": "J", "IR": "I", "SB": "S"}.get(code[:2], "")
+        if sm[1] != _LEGACY_MSG.get(s):
+            p.append(f"{it['src']}: written as an STO {sm[1]} record, {_LEGACY_MSG.get(s)} expected")
+        if "TW" in it["has"] and it.get("T") is not None and it.get("W") is not None:
+            want = Decimal(it["T"])
+        elif it.get("ref") and all(it["ref"]):
+            want = Decimal(_sow(tuple(it["ref"]) + (0, 0, 0), code))
+        else:
+            want = Decimal(0)
+        if o.get("ttm") != want:
+            p.append(f"{it['src']}: STO t_tm {o.get('ttm')} written, the reference time {want} expected")
+        alt = "GPGA" if code == "GAGP" else code
+        if ("sto-transmission-time", f"{code}:t_tm=T") not in assumed and \
+                ("sto-transmission-time", f"{alt}:t_tm=T") not in assumed:
+            p.append(f"{it['src']}: STO t_tm written without the sto-transmission-time assumption")
+        return p
+    s = it["fam"][1] if it["fam"][0] != "V3" else "?"
+    if sm[1] != _LEGACY_MSG.get(s):
+        p.append(f"{it['src']}: written as an ION {sm[1]} record, {_LEGACY_MSG.get(s)} expected")
+    sv = (it.get("svid") or "").strip().lstrip("0")
+    if (o.get("prn") or "").lstrip("0") != sv:
+        p.append(f"{it['src']}: written for satellite {o.get('prn')!r}, {sv!r} expected (SV ID)")
+    fe = first_eph.get(s) or first_eph.get("*") or (1980, 1, 6, 0, 0, Decimal(0))
+    tm = it.get("tmark") or ""
+    if tm and "A" <= tm <= "X":
+        want, detail = (fe[0], fe[1], fe[2], ord(tm) - ord("A"), 0, 0), f"{s}:time-mark-{tm}"
+    else:
+        want, detail = tuple(fe[:5]) + (int(fe[5]),), f"{s}:first-ephemeris-epoch"
+    got = o.get("epoch")
+    if got is None or tuple(got[:5]) + (int(got[5]),) != want:
+        p.append(f"{it['src']}: ION transmission epoch {got} written, {want} expected ({detail})")
+    if ("ion-transmission-time", detail) not in assumed:
+        p.append(f"{it['src']}: ION transmission epoch without the assumption ion-transmission-time {detail}")
+    if it["fam"][0] == "KLOB" and "4.00" <= tv < "4.02":
+        region = o.get("region")
+        if s != "J":
+            if region is not None:
+                p.append(f"{it['src']}: Region code {region} written for a system other than QZSS")
+        else:
+            user = [a["detail"] for a in report.get("assumptions", []) or []
+                    if a["category"] == "qzss-ion-area" and a.get("source") == "user"]
+            if user and user[0] in ("WIDE", "JAPN"):
+                if region != Decimal(0 if user[0] == "WIDE" else 1):
+                    p.append(f"{it['src']}: Region code {region}, the user's area {user[0]} expected")
+                q_area[("user", user[0])] += 1
+            else:
+                if region is not None:
+                    p.append(f"{it['src']}: Region code {region} written, the RINEX 3 set names no area")
+                q_area[("spec-default:blank-region-code", "WIDE")] += 1
+    if it["fam"][0] == "KLOB" and tv >= "4.02":
+        # 4.02: the area of a QZSS set the user names (--qzss-ion-area) is the LNAV subtype, as
+        # DLR writes it (the user's decision of 2026-11-02; rinex_4.02.txt Table A35 note 3* gives
+        # it to CNVX only); a RINEX 2/3 set names none, so without the option there is none
+        user = [a["detail"] for a in report.get("assumptions", []) or []
+                if a["category"] == "qzss-ion-area" and a.get("source") == "user"]
+        want = user[0] if s == "J" and user and user[0] in ("WIDE", "JAPN") else ""
+        if (o.get("sub") or "") != want:
+            p.append(f"{it['src']}: ION subtype {o.get('sub')!r} written, {want!r} expected")
+        if want:
+            q_area[("user", want)] += 1
+    return p
+
+
+# Offsets whose W counts GPS weeks in every version (rinex211.txt Table A3 'W: UTC reference
+# week number. Continuous number, not mod(1024)!', Table A15; rinex305.txt Table A5 p.67
+# 'GPS/GAL/QZS/IRN/SBAS week aligned to GPS, continuous number from 6-Jan-1980'); BDS (GPS weeks
+# in 3.02, from 2006 in 3.03+) and GLONASS (T and W zero) are not resolved
+_W_GPS_BASIS = {"GPUT", "GAUT", "QZUT", "IRUT", "SBUT", "GAGP", "QZGP", "IRGP"}
+_W_LABELS = {"DELTA-UTC: A0,A1,T,W", "D-UTC A0,A1,T,W,S,U", "TIME SYSTEM CORR"}
+
+
+def _gps_to_bdt(w, t):
+    """(BDS week, second of it) of GPS week w, second t: BDT 'zero time started at 00:00:00 UTC on
+    January 1st, 2006 (GPS week 1356) therefore BDT is 14 seconds behind GPS time' (rinex305.txt
+    section 4.1.4 p.16)."""
+    s = (w - 1356) * 604800 + t - 14
+    return s // 604800, s % 604800
+
+
+def _resolve_weeks(items, payload, output=False):
+    """Resolve each truncated UTC reference week of `items` (a broadcast WNt keeps 8 bits:
+    W below 1024 more than 128 weeks from the file's ephemerides is the week congruent with it
+    modulo 256, or 1024 when W >= 256, nearest them, as a receiver resolves it); returns how
+    many were resolved (each must be a reported repair, NAV.HDR.UTC-WEEK)."""
+    from .tokens import lines_of, nav_tokens
+    weeks = sorted((datetime.date(*k[2][:3]) - datetime.date(1980, 1, 6)).days // 7
+                   for k in nav_tokens(lines_of(payload)) if k[0] == "EPH")
+    if not weeks:
+        return Counter()
+    ref = weeks[len(weeks) // 2]
+    n = Counter()
+    for it in items:
+        w = it.get("W")
+        if output and not (it.get("ver") == "3.03" and it["fam"][:2] == "BD"):
+            continue                      # an output resolves nothing but a 3.03 BDS record kept as written
+        if it["kind"] == "STO" and it["fam"][:2] == "BD" and it.get("label") == "TIME SYSTEM CORR" \
+                and "3.03" <= (it.get("ver") or "") < "4" and isinstance(w, int) \
+                and isinstance(it.get("T"), int) and (w or it["T"]) and abs(w - ref) <= 128:
+            # a 3.03+ BDS reference written as GPS week and seconds (BRDM00DLR 3.04: 2216 14 for
+            # BDS week 860 second 0): the BDS week of a GNSS-era file is ref - 1356, so a W
+            # within 128 weeks of the file's GPS week is plainly a GPS one. 3.04+ define BDS weeks
+            # only (rinex304.txt l.571, p.75): a repair; 3.03 names both (rinex303.txt p.70, its
+            # example writes 14 1849), and a record off its columns cannot be rewritten: read so,
+            # an assumption
+            it["W"], it["T"] = _gps_to_bdt(w, it["T"])
+            n["NAV.HDR.BDS-WEEK" if it["ver"] >= "3.04" and not it.get("woff") else "bds-read-gps"] += 1
+            continue
+        if it["kind"] != "STO" or it["fam"] not in _W_GPS_BASIS or it.get("label") not in _W_LABELS \
+                or it.get("woff") or not isinstance(w, int) or w <= 0 or abs(w - ref) <= 128:
+            continue
+        if it["fam"][:2] in ("IR", "GA") and abs(w + 1024 - ref) <= 128:
+            # a NavIC or Galileo system week: both start at GPS week 1024 (rinex305.txt Table 3
+            # p.18), and RINEX wants the week 'aligned to GPS' (Table A5 p.67)
+            it["W"] = w + 1024
+            n["NAV.HDR.UTC-WEEK"] += 1
+            continue
+        if w >= 1024:
+            continue
+        m = 256 if w < 256 else 1024
+        c = w + m * round((ref - w) / m)
+        if abs(c - ref) <= 128:
+            it["W"] = c
+            n["NAV.HDR.UTC-WEEK"] += 1
+    return n
+
+
+def compare_nav_meta(inp, outs, report, merged=None, counts=None):
     """Ionospheric / time-system corrections, EOP records, LEAP SECONDS and the other header
     records of a navigation conversion (outs: every output payload; merged: the other inputs
-    of a --merge, in order)."""
+    of a --merge, in order). counts (a dict, filled): 'qzss-ion-area', the (source, area) of
+    the QZSS sets written from RINEX 2/3 header records into a 4.00/4.01 Region code, and
+    'claims', loss categories of the header corrections that compare_nav adds up."""
     p = []
+    counts = {} if counts is None else counts
+    q_area = counts.setdefault("qzss-ion-area", Counter())
+    q_claims = counts.setdefault("claims", Counter())
     tv = report.get("target_version")
     sv, hin, iin, eop_in = nav_corrections(inp)
+    n_weeks = _resolve_weeks(iin, inp)
     hin_own = hin                         # the first input's own records (same-version rule)
     merge_drop = Counter()
     leap_sv = sv
@@ -2095,6 +2634,7 @@ def compare_nav_meta(inp, outs, report, merged=None):
         bases = [leap_basis]
         for m in merged:
             msv, mh, mi, me = nav_corrections(m)
+            n_weeks += _resolve_weeks(mi, m)
             iin, eop_in = iin + mi, eop_in + me
             extra.append((msv, mh))
             bases.append(basis_of(msv, m))
@@ -2108,12 +2648,21 @@ def compare_nav_meta(inp, outs, report, merged=None):
                 x["category"] == "leap-seconds-basis" for x in report.get("assumptions", []) or []):
             p.append("a merge with a BeiDou-only 3.02 navigation file without a leap-seconds-basis "
                      "BDS assumption")
+    n_rep = Counter(r.get("rule") for r in report.get("repairs", []) or []
+                    if r.get("rule") in ("NAV.HDR.UTC-WEEK", "NAV.HDR.BDS-WEEK"))
+    n_rep["bds-read-gps"] = sum(a["count"] for a in report.get("assumptions", []) or []
+                                if a["category"] == "bds-week-basis")
+    if +n_rep != +n_weeks:
+        p.append(f"UTC reference weeks resolved {dict(n_weeks)} (written modulo 256/1024, or a GPS week "
+                 f"for a BDS one), report repairs {dict(n_rep)}")
     c_merge = Counter({k.split(":", 1)[1]: e["count"] for k, e in _losses(report).items()
                        if k.startswith("merge-header-record-dropped:")})
     if +c_merge != +merge_drop:
         p.append(f"merged inputs' records with no room {dict(merge_drop)}, report claims {dict(c_merge)} "
                  "merge-header-record-dropped")
     parsed = [nav_corrections(o) for o in outs]
+    for o, x in zip(outs, parsed):
+        _resolve_weeks(x[2], o, output=True)   # (a 3.03 output keeps a BDS reference as written)
     iout = [it for x in parsed for it in x[2]]
     eop_out = [sm for x in parsed for sm in x[3]]
     losses = _losses(report)
@@ -2130,6 +2679,7 @@ def compare_nav_meta(inp, outs, report, merged=None):
     # claim): an input record identical to one already matched is not a loss here
     dedupe = "nav-duplicate-removed" in losses and tv >= "4"
     matched_ids = set()
+    first_eph = _first_eph([inp] + list(merged or [])) if tv >= "4" else {}
     for it in iin:
         hit = None
         # the first output record that matches with its reference time too, else the first that
@@ -2167,6 +2717,8 @@ def compare_nav_meta(inp, outs, report, merged=None):
             p += _sto_fields(it, iout[k], utc_lost, field_lost)
         else:
             p += _ion_fields(it, iout[k], tv, utc_lost)
+        if "epoch" in iout[k] and "epoch" not in it:
+            p += _header_to_v4(it, iout[k], tv, report, first_eph, q_area)
         for what, f in notes:
             if what == "lost":
                 field_lost[f] += 1
@@ -2203,6 +2755,15 @@ def compare_nav_meta(inp, outs, report, merged=None):
             c_ion[s] += e["count"]
         elif parts[1] == "STO":
             c_sto["GAGP" if parts[2] == "GPGA" else parts[2]] += e["count"]
+    for cat, e in losses.items():
+        # an SBAS offset has no STO record in 4.00/4.01, whose STO systems are G,R,E,C,J,I
+        # (rinex_4.00.txt Table A30 p.102; S from 4.02, Table A33 p.115)
+        if cat.startswith("nav-sto-system-not-representable:S:"):
+            c_sto[cat.split(":")[2]] += e["count"]
+    if "4.00" <= tv < "4.02":
+        for it in unmatched:
+            if it["kind"] == "STO" and "epoch" not in it and it["fam"][:2] == "SB":
+                q_claims[f"nav-sto-system-not-representable:S:{it['fam']}"] += 1
     # nav-correction-extra says the type's one header slot (rinex305.txt Table A5; rinex211.txt
     # Table A3) is taken: a kept correction of that type must be in the output, and the input
     # must have had more of them than the output keeps. RINEX 4 holds any number of records.

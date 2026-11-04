@@ -1,0 +1,29 @@
+{
+  "_doc": "The user-confirmed RINEX 2 <-> 3 code policies (docs/DECISIONS.md 'Policy defaults the user should confirm', confirmed 2026-11-01, answer 7), written here by hand from that text and PLAN section 3.5, NOT from rinexconv/codemap.py, for tests/independent (headers._v2v3_attributes, compare.compare_obs). v2_to_v3: the default attribute of each RINEX 2 code (assumption source 'table'). DECISIONS gives the C/P/L codes per system, 'Galileo band n -> nX' and 'SBAS C1 -> C1C, band 5 -> 5X'; the D and S codes of a band, GPS L5 and SBAS L1 are INFERRED to take the attribute of the band's phase (or code) as listed, the same rule DECISIONS states for the L2C receiver ('GPS L2/D2/S2 become 2X'). Systems RINEX 2 does not define (J, C, I) have no confirmed default here: only the signal class is checked for them. l2_follows_code: 'When a v2 file has C2 but no P2 (an L2C receiver), GPS L2/D2/S2 become 2X and GLONASS 2C' (source 'receiver-rule:L2-follows-code'). collapse_priority: the RINEX 3 -> 2 attribute order per system and band, best first: 'GPS band 1 C>W>P>Y..., band 2 W>P>Y>D...>C>L>S>X; GLONASS band 1 C>P, band 2 P>C; Galileo C>X>B>A>Z (pilot first), bands 5/7/8 Q>X>I'. A '|' marks a gap the text leaves open ('...'): every attribute before it beats every one after it; attributes not listed are not compared. Galileo 'C>X>B>A>Z' is applied to bands 1 and 6, the bands with A/B/C/X/Z attributes (rinex305.txt Table 5).",
+  "v2_to_v3": {
+    "G": {"C1": "C1C", "P1": "C1W", "L1": "L1C", "D1": "D1C", "S1": "S1C",
+          "C2": "C2X", "P2": "C2W", "L2": "L2W", "D2": "D2W", "S2": "S2W",
+          "C5": "C5X", "L5": "L5X", "D5": "D5X", "S5": "S5X"},
+    "R": {"C1": "C1C", "P1": "C1P", "L1": "L1C", "D1": "D1C", "S1": "S1C",
+          "C2": "C2C", "P2": "C2P", "L2": "L2P", "D2": "D2P", "S2": "S2P"},
+    "E": {"C1": "C1X", "L1": "L1X", "D1": "D1X", "S1": "S1X",
+          "C5": "C5X", "L5": "L5X", "D5": "D5X", "S5": "S5X",
+          "C6": "C6X", "L6": "L6X", "D6": "D6X", "S6": "S6X",
+          "C7": "C7X", "L7": "L7X", "D7": "D7X", "S7": "S7X",
+          "C8": "C8X", "L8": "L8X", "D8": "D8X", "S8": "S8X"},
+    "S": {"C1": "C1C", "L1": "L1C", "D1": "D1C", "S1": "S1C",
+          "C5": "C5X", "L5": "L5X", "D5": "D5X", "S5": "S5X"}
+  },
+  "l2_follows_code": {"G": "X", "R": "C"},
+  "collapse_priority": {
+    "G1": "CWPY",
+    "G2": "WPYD|CLSX",
+    "R1": "CP",
+    "R2": "PC",
+    "E1": "CXBAZ",
+    "E6": "CXBAZ",
+    "E5": "QXI",
+    "E7": "QXI",
+    "E8": "QXI"
+  }
+}

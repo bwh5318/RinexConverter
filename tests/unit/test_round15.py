@@ -30,14 +30,22 @@ class LegacySbasIdsUpgraded(Exact, unittest.TestCase):
     without a provider, and 2.11 'S27' a provider."""
 
     def check(self, src, sat, sbas):
-        for t in ("4.00", "4.02"):
+        # 4.00 has no SBAS STO record: its STO systems are G,R,E,C,J,I (rinex_4.00.txt Table A30
+        # p.102; S from 4.02, Table A33 p.115), so the offset is claimed there (round 32)
+        outs, rep = convert(src, "4.00")
+        self.assertEqual(lines_with(outs, "> STO S"), [])
+        self.assertEqual(rep["losses"]["nav-sto-system-not-representable:S:SBUT"]["count"], 1)
+        self.assertEqual(allowed_check(rep), [])
+        self.assert_exact(lambda r: compare_nav(src, [o.data for o in outs], r), rep)
+        for t in ("4.02",):
             with self.subTest(target=t):
                 outs, rep = convert(src, t)
                 (head,) = [l for o in outs for l in o.data.decode().splitlines() if l.startswith("> STO S")]
                 body = next(l for o in outs for l in o.data.decode().splitlines() if " SBUT " in l)
                 self.assertEqual(head[6:9].strip(), sat)
                 self.assertEqual(body[43:61].strip(), sbas)
-                self.assertEqual(body[62:80].strip(), "UTC(Europe Lab)")    # U = 5, SBUT
+                # U = 5 'Europe Lab', SBUT: UTC(OP) (the user's choice, 2026-11-01)
+                self.assertEqual(body[62:80].strip(), "UTC(OP)")
                 self.assertEqual(V.errors(V.validate(outs[0].data)), [])
                 self.assertEqual(allowed_check(rep), [])
                 self.assert_exact(lambda r: compare_nav(src, [o.data for o in outs], r), rep)

@@ -120,10 +120,16 @@ with spec citations, are in `docs/DECISIONS.md`; fixtures in `tests/unit/test_ro
 | 12 | 9 | 7 | | 26 | 9 | 8 |
 | 13 | 9 | 8 | | 27 | 9 → 8 | 8 |
 | 14 | 9 | 8 | | 28 | 9 → 8 | 8 |
+| | | | | 29 | 9 | 7 |
+| | | | | 30 | 9 | 8 |
+| | | | | **31** | **9, confident** | **9, confident** |
 
 ("9 → 8": confident in the report, then lowered by its own follow-up runs.) Sonnet said "yes,
-confident" in most rounds from 5 on; Sol said "not confident" in every round, each time with
-1-5 concrete blockers, all fixed. The round-28 fixes have not been re-reviewed.
+confident" in most rounds from 5 on; Sol said "not confident" in rounds 1-30, each time with
+1-5 concrete blockers, all fixed. After the user's answers of 2026-11-01 they allowed at most
+rounds 29-31; in round 31 both reviewers were confident with no blocker (Sonnet 9/10, Sol
+9/10), which ends the loop. The polish of round 31 (malformed LEAP SECONDS records refused;
+a temporary-file failure as an io-error) was fixed after it and is not re-reviewed.
 
 From round 22 seeded generators (`tests/independent/generate.py`, `tests/unit/test_generated.py`:
 random valid obs and met files, and corpus nav files cut at random) found most of the later
@@ -133,3 +139,72 @@ generator seed ranges 0-12299, 20000-20599, 30000-31499, 50000-50399, 60000-6149
 80000-80999, 90000-90499, 100000-100999, 110000-110399, 120000-120799, 130000-130799,
 140000-140499 clean on the code of their time; corpus run 18 (obs rows valid for the final
 code) 5,214+ rows and the final nav rerun 1,188+ rows, 0 problems.
+
+## rinexconv converter, rounds 32-35 — 2026-11-02 (desktop session)
+
+The project moved to the desktop (`E:\pythontests\RINEXConvert_Analysis`). The user asked for a fresh
+review by Claude agents and Codex Sol 6.1 at high effort, and for work to continue "until you're
+confident it will always do the conversions correctly". Reviewers: three Opus `reviewer` agents with
+one lens each (observation files; navigation files; whether the checks could pass a wrong converter,
+plus the plumbing) and Codex Sol 6.1 (high) on a fresh thread, all kept across rounds.
+
+| Round | Sol 6.1 | Opus obs | Opus nav | Opus checks |
+|---|---|---|---|---|
+| 32 | 7 | 9, confident | 6 | 6 |
+| 33 (verify) | 8 | 8 | 8 | 7 |
+| 34 (verify) | 8 | **9, confident** | **9, confident** | 8 |
+| 35 (verify, Sol + checks only) | 8 | — | — | 9, confident |
+| 36 (write path) | 8 | — | — | 9, confident |
+| 37 (write path) | 8 | — | — | 9, confident |
+| **38** (write path) | **9, confident** | — | — | **9, confident** |
+
+The obs and nav reviewers were not asked again after round 34: their areas did not change. From
+round 35 Sol's blockers were all in the write path (concurrent jobs, --force, interruptions), not in
+any converted value; each was fixed (docs/DECISIONS.md, "write path, rounds 34-38").
+
+Round 32 found what 31 rounds had not: values whose *meaning* changes between versions (GLONASS
+and SBAS message frame time on a day versus a week basis, the RINEX 2.00 GLONASS signs, the QZSS
+Klobuchar region code of 4.00/4.01, truncated reference weeks), event clock offsets dropped, and
+3.02 phase-shift records misread. All three reviewers who looked at nav found the frame-time bug
+independently. The nav comparator shared the converter's premise that a field's position means the
+same in every version, so a separate field-by-name checker (`tests/independent/navfields.py`) was
+written from the spec tables and wired into the corpus harness. Rounds 33-34 closed narrower items
+(spare-versus-real fields in RINEX 2/3, NavIC/Galileo system weeks, scale-factor precedence inside
+events, the write path under --force and under concurrent jobs). Every item, with its citation, is
+in docs/DECISIONS.md (entries "review round 32" and "review round 33 (verify) fixes").
+
+Evidence at the end: unit suite 1,015 passed, 27 skipped (missing oracles), 13 xfailed; full corpus
+run on the frozen conversion code (corpus_r34): 5,280 conversions, 5,208 converted, 72 by-design
+refusals, 0 crashes, 0 token problems (both nav checkers), 0 idempotence failures, 0 loss-table
+violations, 454 wrapper legs clean, no round trip with different data. More than 120 kinds of wrong
+output built by the checks reviewer over rounds 32-38 are caught. Write path: Sol's 2,620 in-memory
+fault/interruption runs, the checks reviewer's 88 fault cases and real-process races of 3-4 concurrent
+runs, and a test that interrupts every executed line of the write code: each run leaves the folder as it
+was or holding the whole new set.
+
+Open for the user (policy, not defects): `--align-phases` (the 4.x tables give no shift values;
+docs/PHASE_ALIGNMENT.md); QZSS LNAV area into 4.02; GLONASS frame time across the Sunday week
+boundary; the QZSS L2P flag written by real 3.02 files in a spare; the scale-factor precedence
+inside events (an inference both converter and checker share).
+
+## rinexconv, after the user's policy answers — Codex Astra (xhigh), 2026-11-02/03
+
+The user answered the five policy questions and asked: "after that run it by codex astra on xhigh".
+Astra's first run hit the Codex 5-hour usage limit; an Opus reviewer took the slot meanwhile and the
+Astra review ran after the reset (the user chose to wait, then to run one more verify near 80% of the
+weekly Codex budget).
+
+| Pass | Reviewer | Score | What it found (all fixed; docs/DECISIONS.md) |
+|---|---|---|---|
+| 39 | Opus (in the Codex slot) | 8 | --align-phases: a RINEX 2 attribute default decided a physical shift; un-align to 3.00 dropped zero entries before precedence |
+| 40 | Astra review | 7 | Header records after event flags 2/5 ignored by converter and checker alike (all conversions); four --align-phases edge cases (undone accounting, 5-decimal corrections, overflow clipping, non-finite numbers) |
+| 41 | Astra verify 1 | 8 | Avoidable rounding where a 3.00 scale factor holds the value; checker dispatch on a rule-name prefix |
+| 42 | Astra verify 2 | 8 | Checker merged scale-factor scopes; planner sized factors from unapplied corrections |
+| **43** | **Astra verify 3** | **9, confident** | none: "I would ship this version" |
+
+Only pass 40's first item touched ordinary conversions (no corpus file has such an event); every later
+item was inside `--align-phases` un-aligning to 3.00 with corrections finer than a quarter cycle.
+Evidence at the end: unit suite 1,060 passed, 27 skipped, 13 xfailed; full corpus run on the final code (corpus_r41): 5,280 conversions,
+5,208 converted, 72 by-design refusals (the same files as every run), 0 crashes, 0 token problems (both
+nav checkers), 0 idempotence failures, 0 loss-table violations, 454 wrapper legs clean, no round trip
+with different data.

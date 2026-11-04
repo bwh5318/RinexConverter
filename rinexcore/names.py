@@ -14,6 +14,39 @@ LONG = re.compile(r"^(?P<id>[A-Z0-9]{9})_(?P<src>[RSU])_(?P<y>\d{4})(?P<ddd>\d{3
                   r"(?:\.(?P<cmp>gz|Z|bz2|zip))?$", re.I)
 
 
+# Windows' rules for one file name ("Naming Files, Paths, and Namespaces", as Python 3.13's
+# ntpath.isreserved applies them): no <>:"|?*\/ or control character, no trailing dot or
+# blank, and no device name, also with an extension or blanks before it ('nul .txt'),
+# including the superscript forms COM¹ COM² COM³ LPT¹ LPT² LPT³ and CONIN$ / CONOUT$.
+_WIN_CHARS = frozenset('<>:"|?*\\/') | frozenset(chr(i) for i in range(32))
+_WIN_DEVICES = (frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"})
+                | frozenset(f"{p}{c}" for p in ("COM", "LPT") for c in "123456789¹²³"))
+MAX_NAME = 255                    # the longest file name NTFS and the common POSIX file systems hold
+
+
+def unsafe_file_name(name):
+    """Why `name` cannot be written as one plain file name in a folder, on Windows or POSIX, or
+    None if it can (a leading blank is refused too). Output, report and archive-member names
+    are made from file names and header content (MARKER NAME), which a file may fill with
+    anything, so every name is checked before it is used (Sol rounds 29-30)."""
+    if not name or name in (".", ".."):
+        return "no file name"
+    if len(name) > MAX_NAME:
+        return f"longer than {MAX_NAME} characters"
+    if _WIN_CHARS.intersection(name):
+        return 'a character a file name cannot hold (<>:"|?*\\/ or a control character)'
+    if name[-1] in ". " or name[0] == " ":
+        return "a leading blank, or a trailing dot or blank"
+    if name.partition(".")[0].rstrip(" ").upper() in _WIN_DEVICES:
+        return "a Windows device name"
+    return None
+
+
+def shown(name, n=80):
+    """A name short enough for a message."""
+    return repr(name) if len(name) <= n else repr(name[:n - 25] + "..." + name[-20:])
+
+
 def parse(name):
     m = LONG.match(name)
     if m:

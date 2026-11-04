@@ -73,8 +73,13 @@ def v2_to_v3(system, code, v2types, target, overrides=None):
 
 # --- RINEX 3 -> 2 -----------------------------------------------------------
 
-def v3_to_v2(system, code):
-    """The v2 code a v3 code collapses onto, or None if it has no v2 form."""
+def v3_to_v2(system, code, source_version=None):
+    """The v2 code a v3 code collapses onto, or None if it has no v2 form. With the source
+    file's version, a BeiDou B1I code is read in that version's band convention first (C1I
+    in 3.02, C2I from 3.03: bds_is_b1i), so the same signal gets the same RINEX 2 code from
+    every version (round 32: a 3.02 C1I was dropped where a 3.03 C2I became C2)."""
+    if system == "C" and source_version and bds_is_b1i(code, source_version):
+        code = code[0] + "2" + code[2]
     t, band, attr = code[0], code[1], code[2]
     if t not in "CLDS":
         return None

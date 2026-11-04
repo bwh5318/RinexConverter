@@ -16,6 +16,13 @@ encode   For every CRX corpus file: r = crx_to_rnx(crx);
                files were written by many RNX2CRX versions).
 fixtures Archive the hand-made fixtures of tests/unit/test_hatanaka.py and the
          RINEX 4.02 picosecond fixture (CRINEX 3.1) with CRX2RNX's results.
+rnx2crx  RNX2CRX 4.2.0 (tools/oracles/rnxcmp, ORACLES.md) against our encoder, on every
+         decoded corpus CRX file r and every plain corpus obs file r:
+           (a) RNX2CRX(r) == rnx_to_crx(r) byte for byte, ignoring line 2;
+           (b) our decoder gives r back from RNX2CRX(r) (CRX files; a plain file comes
+               back in CRX2RNX's layout, so it is compared with crx_to_rnx(rnx_to_crx(r)));
+         and archives the digests, plus RNX2CRX's CRINEX 3.1 encoding of the RINEX 4.02
+         picosecond fixture in full (PLAN M1), in tests/oracle/rnx2crx_sha256.json.
 profile  cProfile our decoder and encoder on one file and print MB/s.
 
 Every sub-command takes --start/--stop (indices into the sorted CRX list) so
@@ -60,11 +67,31 @@ EXE_CANDIDATES = [
 ]
 
 
-def find_exe():
-    for p in EXE_CANDIDATES:
+RNX2CRX_ARCHIVE = os.path.join(ROOT, "tests", "oracle", "rnx2crx_sha256.json")
+RNX2CRX_CANDIDATES = [
+    os.environ.get("RINEX_ORACLE_RNX2CRX", ""),
+    os.path.join(ROOT, "tools", "oracles", "rnxcmp", "RNX2CRX.exe"),
+]
+
+
+def find_exe(candidates=None):
+    for p in candidates or EXE_CANDIDATES:
         if p and os.path.isfile(p):
             return os.path.abspath(p)
     return None
+
+
+def run_rnx2crx(exe, rnx_bytes, workdir):
+    """Run RNX2CRX on bytes, stdin to stdout; return (exit_code, stderr_text, output with
+    each CRLF turned back into LF, lone_cr). The mingw build writes stdout in text mode."""
+    inp = os.path.join(workdir, "in.rnx")
+    with open(inp, "wb") as f:
+        f.write(rnx_bytes)
+    with open(inp, "rb") as fi:
+        r = subprocess.run([exe], stdin=fi, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    os.remove(inp)
+    lf = r.stdout.replace(b"\r\n", b"\n")
+    return r.returncode, r.stderr.decode("latin-1"), lf, lf.count(b"\r")
 
 
 def sha256_file(path):
@@ -406,6 +433,120 @@ def cmd_fixtures(args):
     return 0 if ok else 1
 
 
+def _body_sha(crx):
+    """sha256 of a CRX file without line 2 (CRINEX PROG / DATE)."""
+    a = crx.split(b"\n", 2)
+    return hashlib.sha256(a[0] + b"\n" + (a[2] if len(a) > 2 else b"")).hexdigest()
+
+
+def _obs_entries():
+    """Every corpus obs file, CRX or plain, sorted by path."""
+    with open(MANIFEST, "rb") as f:
+        man = json.loads(f.read().decode("utf-8"))
+    return sorted((e for e in man["files"] if e["kind"] == "obs"), key=lambda e: e["path"])
+
+
+def cmd_rnx2crx(args):
+    from rinexcore.io import hatanaka
+    from tests.unit import test_hatanaka as th
+    exe = find_exe(RNX2CRX_CANDIDATES)
+    if not exe:
+        print("RNX2CRX.exe not found; nothing to do")
+        return 1
+    if os.path.exists(RNX2CRX_ARCHIVE):
+        with open(RNX2CRX_ARCHIVE, "rb") as f:
+            arch = json.loads(f.read().decode("utf-8"))
+    else:
+        arch = {}
+    arch.update({
+        "tool": "RNX2CRX",
+        "version": "4.2.0",
+        "exe": "tools/oracles/rnxcmp/RNX2CRX.exe",
+        "exe_sha256": sha256_file(exe),
+        "source": "https://terras.gsi.go.jp/ja/crx2rnx/RNXCMP_4.2.0_Windows_mingw_64bit.zip",
+        "command": "RNX2CRX.exe < in.rnx > out.crx   (in.rnx = the corpus file decoded by "
+                   "rinexcore.io.hatanaka.crx_to_rnx, or a plain corpus file after "
+                   "rinexcore.io.compress.unwrap; stdin/stdout in binary mode on our side)",
+        "platform": "Windows 11 x64; the mingw build writes stdout in text mode, so each LF "
+                    "is written as CRLF; the digests are of the output with CRLF -> LF",
+        "fields": {
+            "rinex_sha256": "sha256 of the RINEX bytes fed to stdin",
+            "exit_code": "RNX2CRX exit code (0 ok, 1 error, 2 warning)",
+            "stderr": "RNX2CRX stderr text",
+            "sha256_lf": "sha256 of RNX2CRX's output, CRLF -> LF",
+            "sha256_body": "sha256 of that output without line 2 (CRINEX PROG / DATE, which holds "
+                           "the run date), so that a laptop without the exe can check our "
+                           "encoder's output against it",
+            "lone_cr": "CR bytes not followed by LF (0: the CRLF -> LF mapping is exact)",
+            "ours": "rnx_to_crx(r) against RNX2CRX(r), ignoring line 2 (CRINEX PROG / DATE): "
+                    "'identical', 'identical-after-line-2' or 'differs@...'; "
+                    "'refused: ...' where our encoder refuses",
+            "decodes_back": "our decoder on RNX2CRX's output gives r (CRX files) or "
+                            "crx_to_rnx(rnx_to_crx(r)) (plain files)",
+        },
+    })
+    files = arch.setdefault("files", {})
+    entries = _obs_entries()
+    if args.match:
+        entries = [e for e in entries if args.match in e["path"]]
+    entries = entries[args.start:args.stop]
+    bad = 0
+    with tempfile.TemporaryDirectory(dir=args.tmp) as work:
+        if args.start == 0 and not args.match:
+            rnx = th.make_rinex402_fixture()
+            code, err, crx, lone = run_rnx2crx(exe, rnx, work)
+            ours = hatanaka.rnx_to_crx(rnx, program="rinexcore fixture", date=th.DATE)
+            fx = {"description": "RNX2CRX 4.2.0 run on the RINEX 4.02 picosecond fixture "
+                                 "(tests/unit/test_hatanaka.py:make_rinex402_fixture()); its "
+                                 "CRINEX 3.1 output in full (PLAN M1: the corpus has no CRINEX 3.1 "
+                                 "file)",
+                  "rinex_sha256": th.sha(rnx), "exit_code": code, "stderr": err,
+                  "lone_cr": lone, "crx_sha256_lf": th.sha(crx), "crx": crx.decode("latin-1"),
+                  "ours": _compare_crx(crx, ours),
+                  "decodes_back": code == 0 and hatanaka.crx_to_rnx(crx) == rnx}
+            arch.setdefault("fixtures", {})["rinex402_picosec"] = fx
+            ok = code == 0 and fx["ours"] == "identical" and fx["decodes_back"]
+            bad += not ok
+            print(f"fixture rinex402_picosec: CRINEX {crx[:3].decode()} exit={code} "
+                  f"ours={fx['ours']} decodes_back={fx['decodes_back']}", flush=True)
+        for i, e in enumerate(entries):
+            t0 = time.time()
+            with open(os.path.join(CORPUS, e["path"].replace("/", os.sep)), "rb") as f:
+                payload, _ = unwrap(f.read())
+            r = hatanaka.crx_to_rnx(payload) if e.get("crx") else payload
+            code, err, crx, lone = run_rnx2crx(exe, r, work)
+            try:
+                ours = hatanaka.rnx_to_crx(r)
+                verdict = _compare_crx(crx, ours)
+            except CorruptError as exc:
+                ours, verdict = None, f"refused: {exc}"
+            back = None
+            if code == 0:
+                try:
+                    want = r if e.get("crx") or ours is None else hatanaka.crx_to_rnx(ours)
+                    back = hatanaka.crx_to_rnx(crx) == want
+                except CorruptError:
+                    back = False
+            files[e["path"]] = {"rinex_sha256": hashlib.sha256(r).hexdigest(), "exit_code": code,
+                                "stderr": err, "sha256_lf": hashlib.sha256(crx).hexdigest(),
+                                "sha256_body": _body_sha(crx), "lone_cr": lone, "ours": verdict,
+                                "decodes_back": back}
+            ok = code == 0 and verdict == "identical" and back
+            bad += not ok
+            print(f"{i + args.start:4d} {e['path']:70s} exit={code} ours={verdict[:60]} "
+                  f"back={back} {time.time() - t0:6.1f}s {err.strip()[:60]}", flush=True)
+            del r, crx, ours
+    arch["created_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    arch["files"] = dict(sorted(files.items()))
+    dest = args.out or RNX2CRX_ARCHIVE
+    tmp = dest + f".{os.getpid()}.part"
+    with open(tmp, "wb") as f:
+        f.write((json.dumps(arch, indent=1) + "\n").encode("utf-8"))
+    os.replace(tmp, dest)
+    print(f"rnx2crx: {len(entries)} files, {bad} not identical / not decoded back")
+    return 0 if bad == 0 else 1
+
+
 def cmd_profile(args):
     from rinexcore.io import hatanaka
     path = args.file or os.path.join(CORPUS, "obs", "v3.04",
@@ -449,15 +590,16 @@ def cmd_profile(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("command", choices=["oracle", "decode", "encode", "fixtures", "profile"])
+    ap.add_argument("command", choices=["oracle", "decode", "encode", "fixtures", "rnx2crx", "profile"])
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--stop", type=int, default=None)
     ap.add_argument("--match", default="")
     ap.add_argument("--file", default="")
+    ap.add_argument("--out", default="", help="rnx2crx: write the archive here (chunked runs)")
     ap.add_argument("--tmp", default=None, help="directory for temporary files")
     args = ap.parse_args(argv)
     return {"oracle": cmd_oracle, "decode": cmd_decode, "encode": cmd_encode,
-            "fixtures": cmd_fixtures, "profile": cmd_profile}[args.command](args)
+            "fixtures": cmd_fixtures, "rnx2crx": cmd_rnx2crx, "profile": cmd_profile}[args.command](args)
 
 
 if __name__ == "__main__":

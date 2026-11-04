@@ -3,6 +3,446 @@
 Newest first. Each entry says what was decided, why, and whether the user still has to
 confirm it. "Verified" means checked by a test or a corpus run; "assumed" means not yet.
 
+## 2026-11-03 — Codex Astra (xhigh) review fixes
+
+Reviewer: Codex Astra (gpt-6-astra, xhigh), the user's choice ("run it by codex astra on xhigh");
+it first ran out of Codex usage and an Opus reviewer took its slot (8/10: the RINEX 2 attribute
+and zero-entry items in the entry below). Astra then scored the updated tree 7/10 with five
+blockers, all checked and fixed (fixtures `test_round32_obs.HeaderRecordsAfterEveryEventFlag`,
+`test_align_phases.AstraRound39`):
+
+- **Header records after every event flag 2-5 take effect** (all conversions, not only
+  --align-phases): RINEX 2.10 changed "Header records now allowed after all epoch flags >2" to
+  ">1" (rinex211.txt §0.4-0.5); header values stay valid until changed (rinex305.txt §6.5 p.42).
+  Type lists, scale factors and WAVELENGTH FACT in flag-2 and flag-5 events were ignored by the
+  readers, the converter, the validator and the independent checker alike (a shared mistake: a
+  flag-2 SYS / SCALE FACTOR 10 left values tenfold in RINEX 2). No corpus file has such an event.
+- Going to 3.00 under --align-phases, an entry counts as undone only if it changed a retained,
+  non-missing value; every other entry is claimed phase-shift-record-not-representable.
+- A shift result with more than three decimals (a 5-decimal F8.5 correction) is rounded half-even
+  to F14.3 and claimed `phase-unalign-precision` / `phase-align-precision`.
+- A shifted phase past F14.3 is clipped by 1e9 with LLI bit 0, as rinex305.txt §6.7 p.43 asks
+  (this replaces the earlier refusal); only an exact 0.000 result is refused, since it would read
+  as missing.
+- Non-finite numbers ('Infinity', 'NaN', 'sNaN') in SYS / PHASE SHIFT, SYS / SCALE FACTOR,
+  TIME OF FIRST/LAST OBS, GLONASS COD/PHS/BIS and INTERVAL are refused as damage, not a crash.
+- Harness: a round trip whose return leg added SYS / PHASE SHIFT under --assume-phase-aligned, to
+  a source that had none (HRAG00ZAF, LLAG00ESP 3.02), is no longer counted as a data difference.
+
+Unit suite 1,047 passed, 27 skipped, 13 xfailed.
+
+**Astra's verify passes** (8, 8, then 9/10 confident with no blocker): un-aligning to 3.00 no
+longer rounds where 3.00 can hold the exact value. Per system, code and scale-factor scope (the
+header, and each flag 2-5 event that sets that code's factor), the smallest allowed factor that
+keeps every corrected value exact and inside F14.3 is written as SYS / SCALE FACTOR (rule
+OBS.PHASE.UNALIGN-SCALE; rinex300.txt §5.5 p.12 and PLAN §1 clause 6: lossless where the target
+can hold the data); only where no factor works is the value rounded and claimed. The factor is
+decided from the values actually corrected, not from corrections no observation takes. The
+checker reads the scopes itself, finds the smallest working factor per scope, and dispatches on
+the explicit rule names (OBS.PHASE.ALIGN-A19/A23-*, OBS.PHASE.UNALIGN-3.00). Unit suite 1,060
+passed, 27 skipped, 13 xfailed.
+
+## 2026-11-02 — the user's answers, implemented
+
+**`--align-phases`** (PLAN §3.3 rules 2-4; tables in `rinexcore/spec/phaseshift.py`, the checker's
+own copy in `tests/independent/phase_shift_tables.json`, both from docs/PHASE_ALIGNMENT.md;
+fixtures `tests/unit/test_align_phases.py`):
+- Targets 3.02 (Table A19) and 3.03-3.05 (Table A23 of each version): only systems of unknown
+  alignment (RINEX 2, 3.00, a 3.01 entry without values, a 3.02+ system-only or missing record)
+  are shifted; each phase value of a target code gets that version's Δφ (times the scale factor
+  in force), exactly; missing values, LLI, SSI and slip records are untouched. SYS / PHASE SHIFT
+  lists the applied entries, or the "only reference signals" form (rinex302.txt p.41, rinex305.txt
+  §5.2.12). Reported: assumption phase-alignment (user:--align-phases), rule
+  OBS.PHASE.ALIGN-<table>, counts phase-shift-applied:<sys>:<code>:<Δφ>.
+- Never a guessed shift: a code the target's table gives no number for is refused-missing-
+  information, all such codes named: block-dependent rows (GPS L2C = L2 C/A; QZSS L1S in
+  3.04/3.05), "must be aligned to X" rows (e.g. GPS L5X and every Galileo X signal, so most
+  modern Galileo data cannot be aligned this way), restricted and N/A rows, codes absent from the
+  table (SBAS, GPS L1Y/L1M/L2Y/L2M, Galileo L1A/L1Z/L6A/L6Z), and the 3.04 BDS-3 "+1/4
+  (preliminary)" rows, which 3.05 withdrew because "the alignment direction is implementation
+  dependent" (rinex305.txt history p.10).
+- **RINEX 2 sources need their attributes stated** (review round 39, an Opus reviewer in the
+  Codex slot): RINEX 2 does not record a signal's attribute, and the v2 -> v3 default (a label
+  policy) must not decide a physical shift. So a phase whose attribute came from the default table
+  or a receiver rule, and whose candidate attributes have different shifts in the target table, is
+  refused-missing-information naming the `--overrides` entry that would state it (every RINEX 2
+  L1/L2 phase today). With `--overrides` the shift follows the stated attribute.
+- Target 3.00 (rule 3): the Δφ that source records say were applied are subtracted per system,
+  code and satellite, resolved over all entries (zeros and code-only count as 0); a satellite
+  covered by two entries for one code with different values is refused-missing-information
+  (round 39: zero entries had been dropped before the precedence). Zero, code-only, unknown or
+  RINEX 4 sources stay unchanged with warning OBS.PHASE.ALIGN-NOTHING-TO-UNDO; only entries whose
+  correction was not undone are claimed phase-shift-record-not-representable. Warnings
+  OBS.PHASE.ALIGN-NOTHING-TO-DO (no system needs a shift) and OBS.PHASE.ALIGN-NO-COLUMN (a
+  recorded correction for a code with no data).
+- Invocation errors (exit 2): any other target (2.x, 3.01: no table; 4.x: no values, use
+  `--assume-phase-aligned`); both options together; a source whose records show applied shifts
+  (rule 4: the option asserts "unaligned", which the file contradicts); SYS / PHASE SHIFT inside
+  events.
+- Corpus (no option, regression): 1,397/1,397 clean. With the option, 19 files x 3.02-3.05: 44
+  converted with 0 checker problems, 24 refused for signals without a printed shift, 8 invocation
+  errors (KOKV00USA and WUHN00CHN 3.01 record applied corrections; KOKV writes G L1W and R L1P
+  -0.25 where the 3.02+ tables give +1/4: carried as written without the option).
+
+**QZSS LNAV area (answer 2)** is written as the 4.02 subtype `LNAV WIDE/JAPN` (rule
+NAV.ION.REGION-TO-SUBTYPE; validator warning naming DLR's practice); a Region code naming no area
+is still claimed. **GLONASS frame time (answer 3)**: from RINEX 2, seconds from the start of Toc's
+UTC week (Sunday 00:15 with tk 86370 -> -30; Saturday 23:45 with tk 30 -> 604830), assumption
+glonass-frame-time-week (user:2026-11-02 Toc week); RINEX 3/4 values on either reading are
+carried as written; down to RINEX 2 is mod 86400.
+
+## 2026-11-02 — the user's answers to the round-32 policy questions
+
+Asked after round 38 as one numbered list; answered the same day ("after that run it by codex
+astra on xhigh").
+
+1. **`--align-phases`: "old versions only".** Built for the RINEX 3 targets that have a shift
+   table (3.02, Table A19; 3.03-3.05, Table A23 of each version) and for the un-aligning direction
+   to 3.00 (PLAN §3.3 rules 2-4); refused for 2.x, 3.01 (no table) and 4.x (no values; there
+   `--assume-phase-aligned` stays the way). Details in the implementation entry below.
+2. **QZSS LNAV ionosphere area in 4.02: "the way DLR does".** A known area is written as the
+   `WIDE`/`JAPN` subtype on QZSS `LNAV` ION records, as BRD400DLR does, although rinex_4.02.txt
+   Table A35 note 3* gives the subtype for CNVX only; the validator warns on it. Supersedes the
+   round-32 claim `nav-ion-area-not-representable` for that case.
+3. **GLONASS message frame time across the week boundary: "TOC week".** Going up from RINEX 2,
+   the frame time is written in seconds from the start of Toc's UTC week, so it can be negative
+   or 604800 and more, as SBAS does from 2.11. Supersedes round 32's "the frame's own week".
+4. **QZSS L2P flag written by real 3.02 files in the 3.02 spare: "drop and report"** (unchanged).
+5. **Scale-factor precedence inside overlapping records: "up to you".** Kept: within one header or
+   one event, a listed code's factor beats its system's 'all types' factor, in either record
+   order. It is how the header was always read, and it fits rinex305.txt Table A2 ("Repeat record
+   if different factors are applied to different observation types": the listed record is the
+   exception to the general one). The converter and the independent checker each implement it.
+
+## 2026-11-02 — write path, rounds 34-38; end of the round-32 review loop
+
+The conversion code was frozen after round 34 (full corpus run on it: 5,280 conversions, 0 crash,
+token, idempotence or loss-table problems, 454 wrapper legs clean). Rounds 35-38 changed only how
+outputs reach the disk (`rinexconv/engine.py` write_outputs and helpers, `rinexconv/cli.py`):
+
+- **One input, one transaction.** The files made from one input and its report are published
+  together, under an operating-system lock for each folder involved (msvcrt.locking / fcntl.flock
+  on a lock file in the system temp folder named by a hash of the folder's path; re-entrant per
+  thread; taken in a fixed order). Writers to one folder, `--jobs` workers or separate runs, take
+  turns, so a set is never mixed with another and a report always describes the files beside it.
+- **No overwrite without --force, even under a race:** names are reserved by exclusive create
+  before anything is written.
+- **All or nothing.** Data go to temporary files, then each rename step is journalled before it
+  runs; any failure or interruption undoes the journal (judged from the files, safe to repeat), so
+  the folder is left as it was or holds the whole new set, and a file --force was replacing is put
+  back. A folder at an output path is refused.
+- **Limits (documented, not fixed):** a hard kill (not an exception) between reservation and
+  rename can leave zero-byte files under the output names; a second failure during a rollback
+  (an I/O error, or another Ctrl-C) can leave an empty reservation, or an old file under its
+  `<temporary>.old` name, which the error message names; a folder reached by two paths that
+  `Path.resolve()` does not unify (a subst drive, a UNC alias) gets two locks.
+
+Tests: `tests/unit/test_round32_engine.py`, including a test that raises KeyboardInterrupt at every
+executed line of the write code (lines reading `try:` excepted: an exception raised by a trace
+function there skips the enclosing except/finally, a CPython 3.12 artifact a real Ctrl-C cannot
+reach). Final scores: Sol 6.1 9/10, Opus obs 9/10, Opus nav 9/10, Opus checks 9/10, all confident.
+Unit suite: 1,015 passed, 27 skipped, 13 xfailed.
+
+## 2026-11-02 — review round 33 (verify) fixes
+
+Reviewers: Sol 6.1 high 8/10, Opus nav 8/10, Opus obs 8/10, Opus checks 7/10; none confident, each
+with one narrower item; all round-32 fixes confirmed. Fixtures in the same round-32 test files.
+
+- **NavIC/Galileo system weeks** in TIME SYSTEM CORR (BRDC00IGS 2022/2024 IRUT W = 1192/1296, i.e.
+  NavIC weeks; the 4.02 STO was dated 2002): a W whose value + 1024 lies within 128 weeks of the
+  file's ephemeris GPS week (IR*/GA* codes; both system weeks start at GPS week 1024, rinex305.txt
+  Table 3 p.18; TIME SYSTEM CORR wants the GPS-aligned week, Table A5 p.67) is repaired
+  (NAV.HDR.UTC-WEEK; refused under --strict). Round 32's report that this was fixed was wrong.
+- **Spare versus real fields in RINEX 2/3** (Sol and the nav reviewer): a per-version spare table
+  for every system (`rinexcore/nav.spare_positions`, cited). Only two fields differ between RINEX
+  2/3 versions: the GEO IODN (2.11+, spare in 2.10, rinex210.txt Table A16 l.1671 vs rinex211.txt
+  l.1976) and the QZSS L2P flag (3.03+, spare in 3.02, rinex302.txt Table A12). A source spare
+  never fills a target field (left blank, unknown), a value never goes into a target spare, real
+  fields with no target field are claimed (`nav-field-not-representable:S:SBAS:IODN`,
+  `:J:LNAV:L2P-flag`), non-zero spares are claimed; a zero spare going to a RINEX 2/3 spare stays
+  zero (clause 7: 0.0 and blank both mean nothing). Real 3.02 files (BRDM00DLR 2015, CAS100ATA,
+  CKIS00COK) write the QZSS L2P flag in the 3.02 spare; it is dropped and claimed going to 3.03+.
+  **User to choose:** spec (as now) or carry it as the flag.
+- **GLONASS tk day basis** is detected by a circular distance of more than 12 h from Toc's seconds
+  of week (round 32 used 24 h and missed a Monday 00:15 / 1470).
+- **UT offsets:** GLUT/GLGP from RINEX 2 get a1 = 0 ("a1=zero", rinex305.txt Table A5 p.66);
+  RINEX 4 STO records for GPUT, GLUT, GAUT, BDUT and QZUT without a UTC ID get the one ID their
+  table names (UTC(USNO), UTC(SU), UTCGAL, UTC(NTSC), UTC(NICT): rinex_4.00.txt Table 23 p.40,
+  rinex_4.01.txt Table 23 p.42, rinex_4.02.txt Table 27 p.43, "A UTC ID is necessary ... for every
+  UT time offset message"); rule NAV.STO.UTC-ID; a source's own ID wins (a conflict is warned).
+  IRUT and SBUT, which have several IDs, are unchanged.
+- A zero t_tm is written `0.000000000000E+00` (was `E+12`); a 2.00 GLONASS sign flip also warns.
+- **Scale factors in events** (obs reviewer; converter and checker shared the mistake): an event's
+  SYS / SCALE FACTOR records are read as one group with the header's precedence (a listed code
+  beats the system's 'all types' factor, in either record order: an inference, since rinex305.txt
+  §5.2.11 gives no precedence); a system given an 'all types' factor loses its earlier factors,
+  otherwise only the listed codes change (§6.5).
+- A 3.02-3.05 code-only phase entry going to 3.01 becomes 3.01's blank form and is claimed; a
+  RINEX 2 clock readable but not F12.9 that fits 12 columns is carried as written (warning
+  OBS.CLOCK.NOT-F12.9, refused under --strict; plain output with --crx).
+- **Checker:** the user-confirmed v2 -> v3 attribute defaults and the 3 -> 2 collapse priority are
+  checked independently (`tests/independent/attribute_defaults.json`, written from this file;
+  entries that are inferences are marked in it).
+- **Writing:** with --force, a failed set puts back the files it was replacing (they are renamed
+  aside first and deleted only when the whole set is in place); a folder at an output path is
+  refused, --force or not.
+- Not taken: a RINEX 2 tk of 86400 or more stays refused by default (data-level damage; --lenient
+  carries it, clause 9). compare.py's RINEX 4 field tables match nav.py's; navfields.py is the
+  independent transcription and runs on every corpus nav row.
+
+Unit suite: 1,009 passed, 27 skipped, 13 xfailed. Corpus, round-32 code with navfields wired in:
+5,280 conversions, 0 crash/token/idempotence/loss-table problems, 454 wrapper legs clean, no round
+trip with different data; round-33 code: nav 1,199 and obs 3.04/3.05 880 conversions, clean.
+
+## 2026-11-02 — review round 32 (desktop): values whose meaning changes between versions
+
+The project moved from the laptop (F:) to the desktop (`E:\pythontests\RINEXConvert_Analysis`,
+Anaconda Python 3.12.7; the unit suite passed unchanged). The user asked for a fresh review by
+Claude agents and Codex Sol 6.1 (high) and fixes "until you're confident it will always do the
+conversions correctly". Reviewers: Sol 6.1 high 7/10, Opus (nav lens) 6/10, Opus (obs lens) 9/10,
+Opus (checks lens) 6/10; none but the obs lens confident. Every blocker was checked against the
+spec text and the corpus before it was fixed. Fixtures: `tests/unit/test_round32_nav.py`,
+`test_round32_obs.py`, `test_round32_engine.py`.
+
+**Why 31 rounds missed them.** The nav comparator assumed that position k of a record means the
+same thing in every version, which is the converter's own premise; so a value whose *meaning*
+changes between versions passed both. A second, separate nav checker now compares fields by
+name, with its own layouts for every version, system and message type (cited) and its own
+copies of the spec's transformations (`tests/independent/navfields.py`); `tools/corpus_run.py`
+runs it on every nav row. On the round-31 code it found exactly the faults below and no field
+swapped, moved or mis-rounded in 1,149 corpus conversions (106 M field comparisons).
+
+**Navigation (verified):**
+- **GLONASS message frame time:** RINEX 2 'tk, 0 .le. tk .lt. 86400 sec of day UTC' (rinex211.txt
+  Table A11 l.1718) vs 3.00-4.02 '(tk+nd*86400) in seconds of the UTC week' (rinex305.txt Table A10
+  p.74, rinex_4.02.txt Table A15 p.87). It was copied unchanged (brdc2740.26g has 0.0 where BRDC00IGS
+  3.04 has 345600 for the same message). Now: up, the day nearest Toc, in seconds of that instant's
+  own UTC week; down, modulo 86400 (`navconv._frame_time`). A frame in another week than Toc (within a
+  quarter hour of Sunday 00:00) is written in its own week (604770, not -30) and reported as the
+  assumption `glonass-frame-time-week`: the GLONASS tables, unlike the GPS/BDS/GEO ones, give no
+  +-604800 rule. **User to confirm.** Real RINEX 3 files that store tk on the day basis (BOR100POL,
+  CKIS00COK 3.02; 348 records of BRDC00IGS 2017 3.03) are carried as written with warning
+  NAV.GLO.TK-DAY-BASIS (refused under --strict, repaired under --lenient; validator warning).
+- **SBAS frame time:** 2.10 'sec of day GPS' (rinex210.txt Table A16 l.1656) vs 2.11+ GPS seconds of
+  Toc's week, +-604800 allowed (rinex211.txt l.910-915, "a redefinition of the Version 2.10 Message
+  frame time"); converted both ways.
+- **QZSS Klobuchar Region code:** 4.00/4.01 ION line 2 has 'Region code: 0 or blank (wide area), 1
+  (QZSS only - Japan area)' (rinex_4.00.txt l.5908 p.104; rinex_4.01.txt l.6190). The round-3 entry
+  ("4.00/4.01 records carry no area") was wrong, and so was the premise of the user's
+  `--qzss-ion-area` answer. Real data agree with the spec: in BRD400DLR 4.00 the region-1 sets have
+  the Japan-area signature (alpha3 = 0) that 4.02 files label JAPN, the blank ones the wide-area
+  signature. Now 0/blank <-> WIDE and 1 <-> JAPN both ways; the source's own area always wins; the
+  option only labels sets that state none (RINEX 3 QZSA/QZSB, 4.02 LNAV or unlabelled CNVX) going to
+  4.00/4.01. A QZSS LNAV area going to 4.02 is claimed `nav-ion-area-not-representable` (Table A35
+  note 3*: only CNVX takes a subtype; DLR writes `LNAV WIDE/JAPN` anyway). **User to choose:**
+  spec (as now) or DLR's practice.
+- **RINEX 4 field table:** `rinexcore/nav.v4_line_fields` per version, system, message and line;
+  `write_nav` refuses a value in a field the target line lacks. The 4.02 CNAV/CNV2 'Integer flags'
+  (rinex_4.02.txt Table A10 p.81) into 4.00/4.01 are claimed; RINEX 3 spares into 4.x claimed when
+  non-zero; every RINEX 4 in-line spare is written blank ("Spare fields are to be left blank",
+  rinex_4.02.txt §6.4 p.48; 4.00 p.43, 4.01 p.46). Validator VAL.NAV.FIELDS, VAL.NAV.SPARE.
+- **Truncated reference weeks:** RINEX 2 DELTA-UTC W of 566/201/59 (brdc1800.10n, dlft1800.03n,
+  tubi1800.15n) gave 4.02 STO records dated 1981-1990; v3 IRUT 1192/1296 likewise. Resolved to the
+  continuous week nearest the ephemeris weeks (repair NAV.HDR.UTC-WEEK; refused under --strict).
+  BDUT written with a GPS week in 3.04/3.05 (BRDM00DLR 2022-2026: 2216 for BDS week 860) is resolved
+  to the BDS week (repair NAV.HDR.BDS-WEEK; BDT = GPS week - 1356, -14 s, rinex305.txt §4.1.4 p.16);
+  in 3.03, whose text names both bases and whose own example writes `14 1849`, the GPS reading is
+  kept and reported as the assumption `bds-week-basis`.
+- **RINEX 2.00 GLONASS signs:** 2.00 stored -TauN, -GammaN, +TauC; 2.01 introduced -TauN, +GammaN,
+  -TauC (rinex210.txt l.171-180). A 2.00 GLONASS file now has GammaN and TauC negated (rule
+  NAV.GLO.V2.00-SIGNS, assumption `glonass-nav-2.00-signs`).
+- **SBAS STO into 4.00/4.01** is claimed (4.00 Table A30 p.102 lists no S).
+- **Checker holes closed:** STO identifiers tokenised; RINEX 4 ION/STO records built from header
+  corrections checked against the report's assumptions; the EPH body satellite compared.
+
+**Observation (verified):**
+- **Event clock offsets** (flags 2-5) were dropped unreported; the EPOCH record that every flag
+  shares holds the optional clock (rinex305.txt Table A3 p.59; rinex211.txt Table A2). Now read,
+  carried with the clock-precision/clock-overflow rules and written; RNX2CRX copies an event line
+  verbatim (rnx2crx.c put_event_data), and a live RNX2CRX/CRX2RNX round trip is byte-equal. A clock
+  wider than its field is dropped and claimed instead of an internal error.
+- **3.02 phase-shift states:** 3.02 already has Table A19 and the three record states of 3.03
+  (rinex302.txt §9.1 p.41-42); a code-only entry is "only reference signals", i.e. aligned. Six real
+  3.02 files (ISHI, MAJU, MOBS, STJ3, STK2, TSK2) now go to 4.x without `--assume-phase-aligned`. A
+  3.01 code-only entry stays "unknown" (rinex301.txt §9.1 p.24-25) and becomes the unknown (blank)
+  form in 3.02+. The plan's §3.3 table treats 3.02 like 3.01: superseded by this entry.
+- **RINEX 2.20 OBS SCALE FACTOR** (non-standard in 2.10/2.11) was carried into 3.x with the values
+  still scaled; now it becomes SYS / SCALE FACTOR (values unchanged; rinex300.txt §5.5 allows 10,
+  100, etc. only, so other factors are refused). The 2.20 record layout is from memory: the 2.20
+  document is not in `specs/` (assumed).
+- `--lenient` claims text outside fields as `data-text-dropped`, and pre-4.02 epoch columns 57-62 are
+  never read as picoseconds; BeiDou B1I from 3.02 (C1I) and 3.03+ (C2I) reach RINEX 2 alike under
+  `--keep-v2-nonstandard`; a short-decimal F14.3 value RNX2CRX cannot take gives plain output with
+  warning OBS.CRX.FIELD-PLAIN instead of a refusal.
+- **Checker holes closed:** WAVELENGTH FACT L1/2 compared; v2 -> v3 attributes checked against the
+  report's obs-code-attribute assumptions; count records inside flag-4 events checked.
+
+**Engine and CLI:** the outputs of one input are written as a set (every target checked first,
+temporary files, then renames, rolled back on failure; before, a RINEX 4 nav file split into
+RINEX 2 n/g/h could be left with only the n file); an existing report is not overwritten without
+`--force` and is checked before any output is written (so an input whose report cannot be written
+leaves no output; test_round30 changed accordingly); a merge input keeps its refusal class.
+
+**`--align-phases` (user answer 9 of 2026-11-01) is not built: it needs a decision.** The 4.x
+tables (A39 in 4.00/4.01, A45 in 4.02) name the reference signal per band but give no shift
+values; 4.00 removed them on purpose ("how they align depends on the internal tracking
+characteristics of each receiver design", 4.00 history 10 Jun 2021 p.118). The 3.02-3.05 tables
+(A19/A23) give values, but several depend on the satellite block (GPS L2C, QZSS L1S), which RINEX
+does not record, many rows read "must be aligned to X" with no value, and values changed between
+versions (GLONASS L3Q -1/4, +1/4, then none; BDS L2Q/L6Q -1/4 until 3.04). Every table, with
+PDF-checked page citations and the spec's own inconsistencies: docs/PHASE_ALIGNMENT.md.
+**User to decide.**
+
+## 2026-11-01 — review round 31: both reviewers confident; the last fixes
+
+Reviewers: Sonnet 9/10, confident, no blockers (13 partial LEAP SECONDS records through
+round-trip chains; Windows-reserved member names incl. COM¹, LPT², CONIN$, trailing dots; 16
+hostile MARKER NAMEs; its seeds 200000-200299 clean); Codex Sol 6.1 (xhigh) 9/10, confident,
+no blockers (1,008 leap-field chains, 3,000 file-name cases, the 1,199 nav rows). With that
+the review loop ends, as the user set (rounds 29-31). Fixed after the round, not re-reviewed
+(fixtures `tests/unit/test_round31.py`):
+
+- **Malformed LEAP SECONDS records (Sonnet's polish, taken as a defect).** A record a column
+  off (`4 _ 1000 _ BDT` with `BD` in the day field) ended in an internal error going to 4.02
+  and gave `-10 / -356` in 3.02; `4a` or `x` in a field was dropped to blank, an unknown
+  identifier read as GPS. `leap.malformed` (each 4I6 field blank or an integer, columns 25-27
+  blank or GPS/BDT/BDS, nothing after) now makes such a record refused-corrupt (HDR.LEAP)
+  whenever it has to be rewritten (another version, or any merge), and a same-version
+  conversion carries it as written, as for an unreadable GLONASS SLOT entry (round 25).
+  `leap._int` and `navconv._leap_basis` no longer take `²` for a digit (isdigit does). The
+  validator already flagged these inputs (VAL.HDR.NUMBER, VAL.HDR.LEAP.SYSTEM). All 249
+  LEAP SECONDS records of the corpus (headers and events, 480 files) pass the new check, so
+  no real file is refused by it.
+- **A temporary-file failure (Sol's polish).** `mkstemp` failing escaped as OSError; it is
+  an InvocationError (the CLI's io-error for that input).
+
+## 2026-11-01 — review round 30 fixes
+
+Reviewers: Sonnet 9/10 (confident, no blockers: 18 hostile tar member names, 16 hostile
+MARKER NAMEs and nine LEAP SECONDS zero chains, all clean; its seeds 180000-180299 clean);
+Codex Sol 6.1 (xhigh) 8/10 (not confident, 2 blockers, both real). Fixtures:
+`tests/unit/test_round30.py`.
+
+- **A leap-second day tied to its week (Sol 1).** Round 28's "a day goes with its week"
+  treated a known day as unknown when the week was blank: 3.05 `4 3 _ 2BDT` went to 4.02 with
+  day 2 (should be 3, BeiDou 0-6 against GPS 1-7) and 3.02 `4 3 0 2` lost its day in 3.05,
+  unreported and passed by the checker. The fields are optional one by one ("(BNK)",
+  rinex305.txt Table A5), so each is now converted, or kept as not known, on its own
+  (`leap._shift`, `_blank_zeros`, `navconv._merge_leap`; checker `_to_gps`, `_known4`,
+  `_leap_gps`). Round 28's case still holds: in 3.02 a 0 day is not known by its own rule.
+- **Report names past the device guard (Sol 2).** Windows also reserves COM¹ COM² COM³ LPT¹
+  LPT² LPT³, CONIN$, CONOUT$, and names ending in a dot or a blank; a tar member `COM¹`
+  passed and its report `COM¹.report.json` was written unchecked. One check,
+  `rinexcore.names.unsafe_file_name` (Windows' rules as Python 3.13's `ntpath.isreserved`
+  applies them, plus 255 characters at most and no leading blank), now serves tar members,
+  outputs and reports; `engine.safe_path` also requires the path to resolve inside its
+  folder, for reports too. A test compares the rules with `ntpath.isreserved` where Python
+  has it.
+- **Polish, both taken.** A report that cannot be written is an io-error for its input and
+  the batch goes on (Sol); long names are shortened in messages (Sonnet).
+
+Unit suite: 884 passed, 26 skipped, 13 xfailed.
+
+## 2026-11-01 — review round 29 fixes
+
+Reviewers: Sonnet 9/10 (confident, no blockers; its tar attacks, its seeds 160000-160299
+and its recheck of the round-28 subtype hole all clean); Codex Sol 6.1 (xhigh) 7/10 (not
+confident, 3 blockers). All three checked and real. Fixtures: `tests/unit/test_round29.py`
+`SolRound29`.
+
+- **Output names from MARKER NAME (Sol 1).** A RINEX 2 output whose input name follows no
+  convention is named from the first four characters of MARKER NAME; `../x` gave
+  `../x2740.26o`, written outside the output folder (an old path, not tar-specific). Now
+  `engine._marker` takes them only when they are letters and digits (else `xxxx`), and
+  `write_output` refuses any name that is not one plain file name (no folder part, drive,
+  `..`, `:` stream, control character, Windows device name such as CON or NUL.26o) and any
+  target that does not resolve inside the output folder.
+- **A damaged tar header after the first member (Sol 2).** Python's tarfile ends its listing
+  quietly at a header it cannot read after the first member (bad checksum, cut short, no end
+  block), so later members vanished with no error. `archive._check_end` now requires the
+  last member to be followed by a zero block and only zeros after it; anything else is
+  CorruptError IO.TAR after the members before it (a damaged, cut or appended archive).
+  Found while checking item 1: report files are named `<member>.report.json`, so a member
+  name Windows cannot hold or a device name (CON, NUL.26o) is skipped as "no usable file
+  name" (`archive._usable`).
+- **A BeiDou 0 in LEAP SECONDS (Sol 3).** Round 28 read 0 as "not known" in every version,
+  from 3.02's "Zero or blank if not known" (rinex302.txt Table A2 p.55, Table A5 p.63). From
+  3.03 the fields after the count are "(BNK)", Blank if Not Known, a BeiDou day is 0-6 and
+  BDT-UTC was 0 s from 2006 to the end of 2008 (rinex303.txt p.60, rinex304.txt p.65,
+  rinex305.txt Table A2 p.65), so a 2007 `0 ... BDT` went to 4.02 as GPS 0, not 14. Now
+  (`leap.zero_is_value`, checker `_zero_known`): a 0 is a value in BeiDou terms of a 3.03-3.05
+  record, and "not known" otherwise (in GPS terms no GNSS-era file has a 0: GPS-UTC has been
+  1 s or more since 1981, GPS days are 1-7). Crossing the line: a 3.02 BeiDou-only record's
+  unknown zeros are written blank under BDT/BDS in 3.03-3.05 (rule LEAP.UNKNOWN-ZERO-BLANK),
+  and a known BeiDou 0 going to a BeiDou-only 3.02 file is written in GPS terms (14), which
+  the count rule reads back as GPS. The checker compares the fields by what they say (both
+  "not known" is equal; a value written for a field not known in the input is a problem).
+  No corpus file has a 0 in any LEAP SECONDS field or a BeiDou identifier (all 45 distinct
+  records scanned), so this rests on the spec text only.
+- **Sonnet polish** (two tar members with the same file name in different folders: the
+  second is an I/O error "exists"): documented in the README, not changed; it is what two
+  plain inputs with the same name do.
+
+Unit suite: 876 passed, 26 skipped, 13 xfailed.
+
+## 2026-11-01 — the user's answers to the second set of open questions
+
+Asked after round 28, as one numbered list; answered the same day.
+
+1. **Compact RINEX the tools cannot write** (a short cycle-slip record after a mid-file type
+   change; a 4.02 picosecond field that stops part-way): plain RINEX with a warning, as now.
+2. **BeiDou-only nav LEAP SECONDS without an identifier:** the count rule, as now (below 14 is
+   BDS, reported as an assumption).
+3. **RINEX 4 -> 3.02-3.05 ionosphere sets:** one per (type, time mark, SV), as now (90-152
+   IONOSPHERIC CORR lines for the six BRD400DLR files).
+4. **3.00/3.01 `C1 ` to RINEX 2:** reported lost, as now (no corpus file has a blank attribute).
+5. **UTC identifiers:** UTC(NICT) <-> 6 and, for GAUT, UTCGAL <-> 5, as now. **Changed:** an
+   SBUT offset with number 5 ('Europe Lab') becomes UTC(OP) in RINEX 4, the only European lab
+   rinex_4.02.txt Table 27 (p.43-44) lists for SBUT, and UTC(OP) in an SBUT record goes back to
+   5 (it was written 0 and claimed lost). UTCGAL stays Galileo's own: it is Galileo's
+   prediction of UTC from European labs, not Galileo System Time (rinex_4.02.txt below
+   Table 27).
+6. **A GLONASS SLOT / FRQ # inside a RINEX 2 file:** not used for channels, as now.
+7. **The older defaults never put to the user** (RINEX 3 -> 2 collapse order, WAVELENGTH FACT
+   and LLI bit 1, the BeiDou 3.04-only codes dropped, GLONASS records only with GLONASS data,
+   GLUT T/W from the reference date, validator choices 1-5): all confirmed.
+8. **Review:** at most three more rounds (29-31), stopping early when a round brings no
+   blocker from either reviewer; then a full corpus run on the final code.
+9. **`--align-phases`:** built after those rounds.
+10. **`.tar` input:** read in-process (standard-library `tarfile`), no prompt: every RINEX
+    member converted as if given on the command line, nothing unpacked to disk, other members
+    skipped and listed. (No outside gunzip: shipped code runs no outside program, CLAUDE.md
+    rule 2, and gzip is already read in-process.)
+11. **After the rounds:** finish rinexconv (M7, M8) before rinexqc.
+12. **Oracles:** RNX2CRX 4.2.0 now; RTKLIB and Anubis when rinexqc starts; gfzrnx not now;
+    no teqc copy.
+13. **PLAN M0b user review** of HATANAKA.md and allowed_losses.json: waived.
+14. **Clean-up:** the Sol review thread and `.codex-agents/_review/rinexconv/` go when the
+    rounds end.
+
+Done the same day. UTC(OP): `navcorr` (3.x/2.11 SBUT 5 -> UTC(OP), reported as assumption
+`sto-utc-id` with source `user:rinex_4.02-Table27-SBUT`; SBUT UTC(OP) -> 5) and, separately,
+the checker (`headers._utc_number`, `_sto_fields`); UTC(OP) in another record still has no
+number. One corpus file has an SBUT offset (BOR100POL SN, no UTC number): 11 targets, 0
+problems. Tar input: `rinexcore/io/archive.py` (a tar is recognised by its header block, the
+'ustar' magic and a valid checksum, so a RINEX header with 'ustar' in those columns is not)
+and `cli.run_archive`; the library's `convert_data` refuses a tar with an invocation error
+that says so. A member counts as RINEX by its first line or its file name, so a damaged
+RINEX member is refused rather than skipped; folders, links, archives inside the archive
+and names with no usable file part are skipped; a damaged archive is refused after the
+members before the damage. Fixtures: `tests/unit/test_round29.py`, `test_tar_input.py`.
+
+RNX2CRX 4.2.0 (answer 12): downloaded from GSI, the zip's sha256 equal to the one recorded
+for our CRX2RNX (tools/oracles/ORACLES.md). On all 305 corpus obs files our encoder writes
+RNX2CRX's bytes apart from line 2, except the two files with version field `2.1`, which
+RNX2CRX refuses (docs/HATANAKA.md section 10); RNX2CRX's CRINEX 3.1 encoding of the
+picosecond fixture is archived (PLAN M1). Live it confirms both plain fallbacks of answer 1
+(the stale label: "Number of data types exceed MAXTYPE(100)"; the picosecond field: CRX2RNX
+repeats the value on the next epoch) and the encoder's two documented leniencies. Fixtures:
+`test_hatanaka.TestRnx2crxArchive`, `TestRnx2crxLive`, `test_round29.PlainFallbacksConfirmedByRnxcmp`.
+Unit suite: 870 passed, 26 skipped, 13 xfailed; audit mode 7,344 mutations of 275 claims,
+none survived; generator seeds 150000-150599, 34,982 subtests, all pass.
+
 ## 2026-11-01 — review round 28 fixes (not yet re-reviewed)
 
 Reviewers: Sonnet 9/10, then 8/10 (a checker hole on BRD400DLR 2026-001); Codex Sol 6.1

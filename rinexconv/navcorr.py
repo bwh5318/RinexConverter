@@ -25,7 +25,7 @@ from types import SimpleNamespace
 
 from rinexcore.errors import CorruptError
 from rinexcore.header import HeaderRecord
-from rinexcore.nav import NavRecord, fmt_token, token_value
+from rinexcore.nav import KLOBUCHAR_ION, NavRecord, decimal_token, fmt_token, negate_token, token_value
 
 GPS0 = datetime.datetime(1980, 1, 6)
 BDS0 = datetime.datetime(2006, 1, 1)
@@ -66,6 +66,45 @@ V3_TIME_CODES = {"GPUT", "GLUT", "GAUT", "BDUT", "QZUT", "IRUT", "SBUT", "GLGP",
                  "IRGP", "GPGA"}
 CODE_SYS = {"GP": "G", "GL": "R", "GA": "E", "BD": "C", "QZ": "J", "IR": "I", "SB": "S"}
 STO_MSG = {"G": "LNAV", "R": "FDMA", "E": "IFNV", "C": "D1D2", "J": "LNAV", "I": "LNAV", "S": "SBAS"}
+# offsets whose W counts GPS weeks in every version (rinex211.txt Tables A3/A15; rinex305.txt
+# Table A5 p.67): the ones a truncated broadcast week is resolved for (_resolve_weeks)
+GPS_BASIS_WEEK = {"GPUT", "GAUT", "QZUT", "IRUT", "SBUT", "GAGP", "GPGA", "QZGP", "IRGP"}
+# BDT week 0 is GPS week 1356 and BDT is 14 s behind GPS time (rinex305.txt section 4.1.4 p.16)
+BDS_WEEK0, BDT_GPS = 1356, 14
+
+
+def bds_from_gps(w, t):
+    """(BDS week, seconds of BDS week) of the instant GPS week w, second t."""
+    return divmod((w - BDS_WEEK0) * 604800 + t - BDT_GPS, 604800)
+
+
+def gps_from_bds(w, t):
+    """(GPS week, seconds of GPS week) of the instant BDS week w, second t."""
+    return divmod((w + BDS_WEEK0) * 604800 + t + BDT_GPS, 604800)
+# the 4.00/4.01 Klobuchar Region code: '0 or blank (wide area parameters), 1 (QZSS only - Japan
+# area coefficients)' (rinex_4.00.txt Table A32 p.104, rinex_4.01.txt l.6190 p.108), as
+# written for the 4.02 subtype WIDE/JAPN (rinex_4.02.txt Table 25 p.40)
+REGION_CODE = {"WIDE": "0.000000000000E+00", "JAPN": "1.000000000000E+00"}
+# 'A UTC ID is necessary, as detailed in Table 27, for every "UT" time offset message', and the
+# table names one ID for these (rinex_4.02.txt p.43 Table 27; the same in rinex_4.00.txt Table 23
+# p.40 and rinex_4.01.txt Table 23 p.42); IRUT and SBUT list several, so none is chosen for them
+UTC_ID_TABLE = {"GPUT": "UTC(USNO)", "GLUT": "UTC(SU)", "GAUT": "UTCGAL", "BDUT": "UTC(NTSC)",
+                "QZUT": "UTC(NICT)"}
+
+
+def sto_utc_id(code, utc, report):
+    """The UTC ID a RINEX 4 STO record of `code` carries: the source's own, else the one the
+    table names (rule NAV.STO.UTC-ID); a source ID other than the table's is kept, warned."""
+    want = UTC_ID_TABLE.get(code)
+    if want is None:
+        return utc
+    if not utc:
+        report.rule("NAV.STO.UTC-ID")
+        return want
+    if utc != want:
+        report.warn("NAV.STO.UTC-ID-CONFLICT", f"{code} with UTC ID {utc}: the RINEX 4 table names "
+                    f"{want} (rinex_4.02.txt Table 27 p.43); the source's kept")
+    return utc
 ION_MSG = {"G": "LNAV", "J": "LNAV", "C": "D1D2", "I": "LNAV", "E": "IFNV"}
 
 
@@ -152,6 +191,8 @@ class Corrections:
         self.eop = []
         self.first_eph = {}
         self.repairs = []
+        self.v200_signs = []
+        self.bds_read_gps = []          # codes of BDS records whose W/T were read as GPS ones (_bds_weeks)
         self.source_version = {}
         self.used_all = set()
 
@@ -166,10 +207,120 @@ class Corrections:
             for it in c.iono[n_ion:] + c.time[n_time:]:
                 it["input"] = i
                 it["version"] = f.version
+            c._resolve_weeks(f, c.time[n_time:])
         c._validate()
         for rule, msg, line in c.repairs:
             report.repair(rule, msg, line)
+        for code in c.bds_read_gps:
+            report.assume("bds-week-basis", f"{code}:GPS-week", "data:W-near-the-ephemeris-GPS-week")
+        if c.v200_signs and not any(w["rule"] == "NAV.GLO.V2.00-SIGNS" for w in report.warnings):
+            report.warn("NAV.GLO.V2.00-SIGNS", "a RINEX 2.00 GLONASS file: -GammaN and +TauC read as "
+                        "the 2.00 definition stores them (rinex210.txt l.171-180) and written as "
+                        "+GammaN, -TauC")
+        for rule in c.v200_signs:
+            report.rule(rule)
+            report.assume("glonass-nav-2.00-signs", "-GammaN and +TauC as written by RINEX 2.00",
+                          "spec:rinex210.txt l.171-180")
         return c
+
+    def _resolve_weeks(self, f, items):
+        """A UTC reference week W written as the broadcast truncates it (GPS WNt is 8 bits:
+        brdc1800.10n W=566 is week 1590 mod 1024, tubi1800.15n W=59 week 1851 mod 256; NavIC
+        IRUT W=1192 in BRDC00IGS 2022 is 2216 mod 1024) dates the correction 1990 or 1981 in
+        every target. W is a continuous week ('Continuous number, not mod(1024)!', rinex211.txt
+        Table A3 l.1344 and l.208; 'GPS/GAL/QZS/IRN/SBAS week aligned to GPS, continuous number
+        from 6-Jan-1980', rinex305.txt Table A5 p.67): a W below 1024 more than 128 weeks from the
+        file's ephemerides (their median GPS week) is resolved to the week congruent with it
+        modulo 256 (W < 256) or 1024 nearest them, as a receiver resolves WNt (PLAN §1 clause 9:
+        a header repair, reported, refused under --strict). Written into the record itself, so
+        every target, the source's own version too, gets the same week. BDS weeks (BDUT: GPS
+        weeks in 3.02, from 2006 in 3.03+) and GLONASS (T and W zero) are left as they are."""
+        weeks = sorted((datetime.date(*r.time[:3]) - GPS0.date()).days // 7
+                       for r in f.records if r.kind == "EPH")
+        ref = weeks[len(weeks) // 2] if weeks else None
+        self._bds_weeks(f, items, ref)
+        if ref is None:
+            return
+        for it in items:
+            w = it.get("W")
+            if it["code"] not in GPS_BASIS_WEEK or not isinstance(w, int) or w <= 0 \
+                    or abs(w - ref) <= 128 or it.get("origin") not in ("v2", "v3"):
+                continue
+            if (it["code"][:2] in ("IR", "GA") or it["code"] == "GPGA") and abs(w + 1024 - ref) <= 128:
+                # a NavIC or Galileo system week, which starts at GPS week 1024 (rinex305.txt
+                # Table 3 p.18: NavIC/IRNSS and GST broadcast week 0 = RINEX week 1024), where
+                # RINEX wants the week 'aligned to GPS' (Table A5 p.67): BRDC00IGS 2022 3.04 IRUT
+                # W 1192 is GPS week 2216
+                new = w + 1024
+                why = f"a {'NavIC' if it['code'][:2] == 'IR' else 'Galileo'} system week (week 0 = GPS week 1024)"
+            elif w < 1024:
+                m = 256 if w < 256 else 1024
+                new = ref + (w - ref) % m
+                if new - ref > m // 2:
+                    new -= m
+                if abs(new - ref) > 128:
+                    continue
+                why = f"a broadcast week number modulo {m}"
+            else:
+                continue
+            rec = it["rec"]
+            x = rec.content.ljust(60)
+            if rec.label == "DELTA-UTC: A0,A1,T,W" and _ival(x[50:59]) == w:
+                content = x[:50] + f"{new:9d}" + x[59:]
+            elif rec.label in ("D-UTC A0,A1,T,W,S,U", "TIME SYSTEM CORR") and _ival(x[45:50]) == w:
+                content = x[:45] + f"{new:5d}" + x[50:]
+            else:
+                continue
+            it["W"] = new
+            it["rec"] = HeaderRecord(rec.label, content.rstrip(), rec.lineno)
+            self.repairs.append(("NAV.HDR.UTC-WEEK",
+                                 f"{rec.label.split(':')[0]} {it['code']} W {w} is {why}; written {new}, "
+                                 f"the continuous GPS-aligned week nearest the file's ephemerides (GPS week "
+                                 f"{ref})", rec.lineno))
+
+    def _bds_weeks(self, f, items, ref):
+        """BeiDou time-system corrections (BDUT) are held in BDS terms: week from 2006-01-01 and
+        seconds of that week, BDT (rinex303.txt p.70 'BDS week, continuous from: 1-Jan-2006',
+        rinex304.txt p.75, rinex305.txt Table A5 p.67; RINEX 4 STO records likewise). 3.02 counts
+        them in GPS terms ('T Reference time for polynomial (Seconds into GPS/GAL week); W
+        Reference week number (GPS/GAL week, continuous number)', rinex302.txt Table A5 p.63):
+        a 3.02 record's T and W are taken over to BDS terms, the record itself staying as written
+        for a 3.02 target. A 3.03+ record whose W is plainly a GPS week, within 128 weeks of the
+        file's ephemerides' GPS week (the BDS week is 1356 smaller: 'BDT zero time started at
+        00:00:00 UTC on January 1st, 2006 (GPS week 1356) therefore BDT is 14 seconds behind GPS
+        time', rinex305.txt section 4.1.4 p.16), is a writer's error (BRDM00DLR 3.04: W 2216, T
+        14 for BDS week 860 second 0): resolved the same way, a header repair (NAV.HDR.BDS-WEEK,
+        refused under --strict) written into the record. 3.03 says both ('GPS/GAL/BDS/IRN/SBAS
+        week, continuous number from 6-Jan-1980 ... BDS week, continuous from: 1-Jan-2006',
+        rinex303.txt p.70; its own example writes BDUT 14 1849: 3.04 removed BDS from the GPS
+        group, rinex304.txt l.571): there such a W is read as a GPS week and the record kept as
+        written, reported as an assumption, as is one read off its columns. it['wbasis'] says
+        which terms the record (rec) is in."""
+        for it in items:
+            if it["code"][:2] != "BD" or not isinstance(it.get("W"), int) \
+                    or not isinstance(it.get("T"), int) or not (it["W"] or it["T"]):
+                continue
+            it["wbasis"] = "BDS"
+            if f.version < "3.03":
+                it["W"], it["T"] = bds_from_gps(it["W"], it["T"])
+                it["wbasis"] = "GPS"
+                continue
+            if ref is None or abs(it["W"] - ref) > 128 or f.version >= "4":
+                continue
+            w, t = it["W"], it["T"]
+            rec = it["rec"]
+            x = rec.content.ljust(60)
+            it["W"], it["T"] = bds_from_gps(w, t)
+            if f.version < "3.04" or it.get("origin") != "v3" or _ival(x[38:45]) != t or _ival(x[45:50]) != w:
+                it["wbasis"] = "GPS"
+                self.bds_read_gps.append(it["code"])
+                continue
+            it["rec"] = HeaderRecord(rec.label, (x[:38] + f"{it['T']:7d}{it['W']:5d}" + x[50:]).rstrip(),
+                                     rec.lineno)
+            self.repairs.append(("NAV.HDR.BDS-WEEK",
+                                 f"TIME SYSTEM CORR {it['code']} W {w} T {t} is GPS week and seconds "
+                                 f"(the file's ephemerides are in GPS week {ref}); RINEX {f.version} counts "
+                                 f"BDS weeks: written W {it['W']} T {it['T']}", rec.lineno))
 
     def _read_source(self, f):
         for r in f.records:
@@ -222,7 +373,17 @@ class Corrections:
                 y, mo, d = _ival(x[0:6]), _ival(x[6:12]), _ival(x[12:18])
                 code = "GLUT" if f.ftype == "G" else "SBUT"
                 ref = (y, mo, d, 0, 0, Decimal(0)) if y and mo and d else None
-                self.time.append({"code": code, "a0": _tok(x[21:40]), "a1": "", "a2": "",
+                a0 = _tok(x[21:40])
+                if code == "GLUT" and getattr(f, "version", "") == "2.00" and _ok(a0) and a0:
+                    # RINEX 2.00 GLONASS files store +TauC, every later version -TauC
+                    # (rinex210.txt l.171-180, section 8.2): the record is rewritten with -TauC,
+                    # so that every target, a RINEX 2 one too, holds the modern value
+                    neg = negate_token(a0)
+                    if neg != a0:
+                        r = HeaderRecord(r.label, (x[:21] + neg.rjust(19) + x[40:]).rstrip(), r.lineno)
+                        a0 = neg
+                    self.v200_signs.append("NAV.GLO.V2.00-SIGNS")
+                self.time.append({"code": code, "a0": a0, "a1": "", "a2": "",
                                   "T": None, "W": None, "sat": "", "utc": None, "sbas": "",
                                   "ref": ref, "ttm": None, "rec": r, "origin": "v2"})
             elif r.label == "D-UTC A0,A1,T,W,S,U":
@@ -359,9 +520,13 @@ class Corrections:
                 else:
                     model = f"V4:{s}:{r.msg}:{r.sub}"
                     p = list(v)
+                # the 4.00/4.01 Klobuchar Region code (REGION_CODE), which no RINEX 2/3 header
+                # record holds (_area_loss)
+                region = v[8] if (s, r.msg) in KLOBUCHAR_ION and "4" <= f.version < "4.02" and len(v) > 8 else ""
                 self.iono.append({"model": model, "sys": s, "p": p, "tmark": "",
                                   "svid": r.sat[1:].strip(), "rec": r, "origin": "v4",
-                                  "msg": r.msg, "sub": r.sub, "ttm": r.time})
+                                  "msg": r.msg, "sub": r.sub, "ttm": r.time, "region": region,
+                                  "area_stated": (s, r.msg) in KLOBUCHAR_ION and "4" <= f.version < "4.02"})
             elif r.kind == "EOP":
                 self.eop.append(r)
 
@@ -405,6 +570,7 @@ class Corrections:
                         txt = "  " + "".join(self._d(v, 12, 4, "D", report, lab) for v in vals)
                         out.append(HeaderRecord(lab, txt))
                 self._ion_meta(k, tv, report)
+                self._area_loss(k, report)
             t = self._pick("GPUT", report, used)
             if t is not None and (t["origin"] == "v2" or self._as_written(t, tv)):
                 out.append(t["rec"])
@@ -537,6 +703,8 @@ class Corrections:
                             # the 4.02 area (QZSS CNVX WIDE/JAPN, rinex_4.02.txt Table 25 p.40)
                             # has no RINEX 3 field: the values are kept, the subtype is not
                             report.loss(f"nav-subtype-not-representable:ION:{it['sys']}:{it['msg']}", 1)
+                        else:
+                            self._area_loss(it, report)
                     else:
                         report.rule("NAV.V2V3.ION")
                 used.add(id(it))
@@ -567,6 +735,17 @@ class Corrections:
                 continue
             seen_codes.add(code)
             used.add(id(t))
+            bds = code[:2] == "BD" and isinstance(t.get("W"), int) and isinstance(t.get("T"), int) \
+                and bool(t["W"] or t["T"])
+            target_basis = "GPS" if tv < "3.03" else "BDS"
+            if bds and t["origin"] == "v3" and tv != t.get("version") and t.get("wbasis", "BDS") != target_basis:
+                # BDS terms from 3.03, GPS terms in 3.02 (_bds_weeks): T and W rewritten, the
+                # rest of the record as written
+                T, W = (t["T"], t["W"]) if tv >= "3.03" else gps_from_bds(t["W"], t["T"])[::-1]
+                x = t["rec"].content.ljust(60)
+                out.append(HeaderRecord("TIME SYSTEM CORR", (x[:38] + f"{T:7d}{W:5d}" + x[50:]).rstrip()))
+                report.rule("NAV.HDR.BDS-WEEK-BASIS")
+                continue
             if t["origin"] == "v3" and code == t["code"]:
                 out.append(t["rec"])
                 continue
@@ -581,10 +760,16 @@ class Corrections:
                 report.rule("NAV.V3V3.GPGA-GAGP")
                 continue
             T, W = self._tw(t, report)
+            if code[:2] == "BD" and tv < "3.03" and (T or W):
+                W, T = gps_from_bds(W, T)                 # 3.02 counts GPS weeks (_bds_weeks)
+                report.rule("NAV.HDR.BDS-WEEK-BASIS")
             utc = self._utc(t, 7, "TIME SYSTEM CORR", report)   # 3.05: '>7 = not assigned yet'
             sat = self._ident(t, report)
             txt = (f"{code} " + self._d(t["a0"], 17, 10, "D", report, "TIME SYSTEM CORR")
-                   + self._d(t["a1"], 16, 9, "D", report, "TIME SYSTEM CORR")
+                   # GLUT/GLGP 'a1=zero' (rinex305.txt Table A5 p.66): a RINEX 2 CORR TO SYSTEM
+                   # TIME has no a1, written 0
+                   + self._d(t["a1"] or ("0" if code in ("GLUT", "GLGP") else ""), 16, 9, "D", report,
+                             "TIME SYSTEM CORR")
                    + f" {T if T is not None else 0:6d} {W if W is not None else 0:4d} {sat:5s} {utc or 0:2d}")
             self._v4_fields(t, report)
             out.append(HeaderRecord("TIME SYSTEM CORR", txt))
@@ -622,6 +807,22 @@ class Corrections:
             if it.get("svid"):
                 report.loss(f"header-field-not-representable:ION-SAT:{s}", 1)
 
+    @staticmethod
+    def _area_loss(it, report):
+        """A 4.00/4.01 Klobuchar set states its area in the Region code ('0 or blank (wide area
+        parameters), 1 (QZSS only - Japan area coefficients)', rinex_4.00.txt Table A32 p.104):
+        a RINEX 2 ION ALPHA/BETA or RINEX 3 IONOSPHERIC CORR record has no such field
+        (rinex211.txt Table A3; 'QZSA = QZS alpha0 - alpha3', rinex305.txt Table A5 p.65), so a
+        QZSS set's area, and a code another system should not have, goes."""
+        if not it.get("area_stated"):
+            return
+        try:
+            v = token_value(it.get("region") or "")
+        except ArithmeticError:
+            v = "?"
+        if it["sys"] == "J" or v not in (None, 0):
+            report.loss(f"nav-ion-area-not-representable:{it['sys']}:{it['msg']}", 1)
+
     def _carry_iono(self, it, tv, report):
         """A RINEX 3 IONOSPHERIC CORR set as written; to 3.00/3.01, which have no time mark
         or SV ID columns, without them (claimed)."""
@@ -630,8 +831,12 @@ class Corrections:
             return [HeaderRecord(r.label, r.content[:53], r.lineno) for r in it["rec"]]
         return list(it["rec"])
 
-    def to_v4_records(self, tv, eph, report):
-        """ION/STO records from RINEX 2/3 header corrections (v4 records pass through)."""
+    def to_v4_records(self, tv, eph, report, area=None):
+        """ION/STO records from RINEX 2/3 header corrections (v4 records pass through). area:
+        --qzss-ion-area, the area of the QZSS sets (RINEX 3 QZSA/QZSB name none) as the Region
+        code of a 4.00/4.01 Klobuchar record (REGION_CODE); without it the code is blank, which
+        those versions read as wide area (an assumption). 4.02 holds no area for these LNAV
+        sets (rinex_4.02.txt Table A35 note 3* p.117)."""
         out = []
         for it in self.iono:
             if it["origin"] == "v4":
@@ -645,6 +850,18 @@ class Corrections:
                     report.loss(f"nav-correction-not-representable:ION:KLOB-incomplete:{s}", 1)
                     continue
                 vals = p[0:3] + p[3:7] + [p[7]]
+                sub = ""
+                if s == "J" and tv < "4.02":
+                    if area:
+                        vals.append(REGION_CODE[area])
+                        report.assume("qzss-ion-area", area, "user")
+                    else:
+                        report.assume("qzss-ion-area", "WIDE", "spec-default:blank-region-code")
+                elif s == "J" and area:
+                    # the LNAV subtype in 4.02: user decision 2026-11-02, follow DLR (BRD400DLR)
+                    # rather than rinex_4.02.txt Table A35 note 3*
+                    sub = area
+                    report.assume("qzss-ion-area", area, "user")
             elif it["model"] == "NEQG":
                 p = (it["p"] + [""] * 4)[:4]
                 # the fourth GAL parameter is "zero" in 3.00-3.02 (rinex302.txt l.3289), a
@@ -663,7 +880,7 @@ class Corrections:
             ttm = self._ttm_assumed(it, s, report)
             sv = it.get("svid") or ""
             sat = f"{s}{int(sv):02d}" if sv.isdecimal() else f"{s}  "
-            out.append(NavRecord("ION", sat, ION_MSG[s], "", ttm, vals, "", None, 0))
+            out.append(NavRecord("ION", sat, ION_MSG[s], sub if it["model"] == "KLOB" else "", ttm, vals, "", None, 0))
             report.rule("NAV.V3V4.HEADER-ION-TO-RECORD")
         for t in self.time:
             if t["origin"] == "v4":
@@ -673,16 +890,27 @@ class Corrections:
             if s is None:
                 report.loss(f"nav-correction-not-representable:STO:{code}", 1)
                 continue
+            if s == "S" and tv < "4.02":
+                # the STO satellite system is G,R,E,C,J,I in 4.00/4.01 (rinex_4.00.txt Table A30
+                # p.102, rinex_4.01.txt l.6062 p.106); S from 4.02 (rinex_4.02.txt Table A33 p.115)
+                report.loss(f"nav-sto-system-not-representable:S:{code}", 1)
+                continue
             ref = self._ref(t, s, report)
             T, W = self._tw(t, report)
-            ttm = f"{Decimal(T):.12E}" if T is not None else ""
+            ttm = decimal_token(Decimal(T))[0] if T is not None else ""     # (0: 0.000000000000E+00)
             report.assume("sto-transmission-time", f"{code}:t_tm=T", "assumed:reference-time")
             utc = t["utc"]
             utcs = UTC_IDS.get(utc, "") if isinstance(utc, int) and code.endswith("UT") else ""
+            src = "table:rinex305-A5"
             if code == "GAUT" and utc == 5:
                 utcs = "UTCGAL"          # Galileo's UTC realisation in the 4.02 list (Table A33)
+            elif code == "SBUT" and utc == 5:
+                # 'Europe Lab' for SBAS: UTC(OP), the only European lab rinex_4.02.txt Table 27
+                # (p.43-44) lists for SBUT (the user's choice, 2026-11-01)
+                utcs, src = "UTC(OP)", "user:rinex_4.02-Table27-SBUT"
             if utcs:
-                report.assume("sto-utc-id", f"{code}:{utc}->{utcs}", "table:rinex305-A5")
+                report.assume("sto-utc-id", f"{code}:{utc}->{utcs}", src)
+            utcs = sto_utc_id(code, utcs, report)
             sbas = t["sbas"] if code == "SBUT" else ""
             if t["sbas"] and not sbas:
                 report.loss(f"header-field-not-representable:SBAS-ID:{t['sbas']}", 1)
@@ -694,7 +922,8 @@ class Corrections:
                 sat = s + sat[1:]
             satid = sat if len(sat) == 3 and sat[1:].isdecimal() else f"{s}  "
             extra = f" {code:18s} {sbas:18s} {utcs:18s}".rstrip()
-            vals = ["", "", "", ttm, t["a0"], t["a1"], t["a2"] or "0.000000000000E+00"]
+            a1 = t["a1"] or ("0.000000000000E+00" if code in ("GLUT", "GLGP") else "")   # a1 = zero
+            vals = ["", "", "", ttm, t["a0"], a1, t["a2"] or "0.000000000000E+00"]
             out.append(NavRecord("STO", satid, STO_MSG[s], "", ref, vals, extra, None, 0))
             report.rule("NAV.V3V4.HEADER-STO-TO-RECORD")
         return out
@@ -733,8 +962,11 @@ class Corrections:
     def _utc(t, top, label, report):
         """The I2 UTC identifier of a 2.11 D-UTC (1-6) or RINEX 3 TIME SYSTEM CORR (1-7)
         record from a number or a RINEX 4 UTC ID (UTC_IDS_REV); one with no number in the
-        target is written 0 ('unknown') and claimed."""
+        target is written 0 ('unknown') and claimed. An SBUT UTC(OP) is 5, 'Europe Lab' (the
+        reading the other way of the 3.x-to-4 choice above)."""
         u = t["utc"] if isinstance(t["utc"], int) else UTC_IDS_REV.get(t["utc"] or "", 0)
+        if t["utc"] == "UTC(OP)" and t["code"] == "SBUT":
+            u = 5
         if (t["utc"] and not u) or (u and u > top):
             report.loss(f"header-field-not-representable:{label}:UTC-ID:{t['utc']}", 1)
             return 0

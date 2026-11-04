@@ -13,7 +13,7 @@ Met token:  (epoch, met-type, value)
 import json
 import os
 from collections import Counter
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(_HERE, "code_expectations.json"), "rb") as _fh:
@@ -138,9 +138,15 @@ def _a3(text):
 def _scale_update(scale, lines):
     """SYS / SCALE FACTOR lines (A1,1X,I4,2X,I2,12(1X,A3), continuation 10X,12(1X,A3):
     rinex305.txt Table A2 p.56-57, 'factor to divide stored observations with before use',
-    '0 or blank: all observation types'). A later record (in an event) holds from there on
-    for what it names (rinex305.txt §6.5): a factor for all types replaces the system's
-    factors, one for listed types changes those only."""
+    '0 or blank: all observation types'). The lines of one place (the header, or one event)
+    are one group: in it a listed code's factor beats its system's 'all types' one in either
+    record order, as the lookup in obs_tokens tries (sys, code) first (the spec gives no
+    precedence for overlapping records, rinex305.txt section 5.2.11: an inference, the same
+    for the header and for events). A later group holds from there on for what it names
+    (rinex305.txt section 6.5): a system it gives an 'all types' factor loses its earlier
+    factors, otherwise only the listed codes change (round 32: the lines were applied one by
+    one, so 'G 100 1 L1C' then 'G 10' in an event lost L1C=100)."""
+    grp = {}
     cur = None
     for l in lines:
         c = l[:60].ljust(60)
@@ -149,14 +155,46 @@ def _scale_update(scale, lines):
             codes = _a3(c[10:60])
             cur = (c[0], fac)
             if not codes:
-                for k in [k for k in scale if k[0] == c[0]]:
-                    del scale[k]
-                scale[(c[0], "*")] = fac
+                grp[(c[0], "*")] = fac
             for code in codes:
-                scale[(c[0], code)] = fac
+                grp[(c[0], code)] = fac
         elif cur is not None:
             for code in _a3(c[10:60]):
-                scale[(cur[0], code)] = cur[1]
+                grp[(cur[0], code)] = cur[1]
+    for s in {k[0] for k in grp if k[1] == "*"}:
+        for k in [k for k in scale if k[0] == s]:
+            del scale[k]
+    scale.update(grp)
+    return grp
+
+
+def _v2_scale_update(scale, lines):
+    """RINEX 2 OBS SCALE FACTOR lines: the unofficial RINEX 2.20 record (Gurtner and Estey 2002,
+    cited in rinex300.txt l.1583) of which SYS / SCALE FACTOR 'is a modification' (rinex300.txt
+    section 5.5): I6 factor to divide the stored observations with, I6 number of types (0 or
+    blank: all types), 8(4X,A2) types; a line with no factor continues the types before it.
+    UNVERIFIED: the 2.20 document is not in specs/; this is the layout the round-32 brief gives.
+    RINEX 2 has one type list for every system, so the keys are ('', code) and ('', '*').
+    The lines of one place are one group, as in _scale_update (listed beats 'all types')."""
+    grp = {}
+    cur = None
+    for l in lines:
+        c = l[:60].ljust(60)
+        if c[0:6].strip():
+            fac = int(c[0:6])
+            codes = c[12:60].split()
+            cur = fac
+            if not codes:
+                grp[("", "*")] = fac
+            for code in codes:
+                grp[("", code)] = fac
+        elif cur is not None:
+            for code in c[6:60].split():
+                grp[("", code)] = cur
+    if ("", "*") in grp:
+        for k in [k for k in scale if k[0] == ""]:
+            del scale[k]
+    scale.update(grp)
 
 
 _Q3 = Decimal("0.001")
@@ -191,9 +229,16 @@ class _Counts(Counter):
         self.records = Counter()          # satellite records per system (data epochs)
         self.records_by_list = Counter()  # satellite records per obs-type list index
         self.record_lists = []            # ((epoch, flag), satellite, list index) of every record
+        # data-section lines with non-blank text in columns no field covers (a --lenient
+        # converter drops it and claims data-text-dropped, one per line: compare_obs)
+        self.skipped = 0
+        # (sys, code, delta) -> phase values moved back by delta (obs_tokens adjust)
+        self.adjusted = Counter()
+        self.adjust_rounded = Counter()   # (sys, target code): shifted values rounded to 3 decimals
+        self.adjust_clipped = Counter()   # (sys, target code): shifted values clipped by 1e9
 
 
-def obs_tokens(lines, v3_lli=False, exact=False, drop=None):
+def obs_tokens(lines, v3_lli=False, exact=False, drop=None, adjust=None, norm=None, factors=None):
     """({(epoch, sat, flag): sorted tuple of (signal-class, value, lli, ssi)},
     {(sys, code): count of non-missing values}). A missing value (blank or zero) with an LLI
     or SSI flag is an item with value '' (flags kept, no observation counted); one without
@@ -208,6 +253,19 @@ def obs_tokens(lines, v3_lli=False, exact=False, drop=None):
     v3_lli: express a RINEX 2 file's LLI as RINEX 3 would. RINEX 2 bit 1 means "opposite
     wavelength factor"; RINEX 3 bit 1 means half-cycle ambiguity, so for GPS L1/L2 phase
     with factor 2 the bit flips (flags 0/1 only; rinex211.txt Tables A1/A2, rinex305.txt §6.7).
+
+    adjust(sys, code, sat, epoch, stored value, input factor, slip, scope) -> (shift in cycles,
+    target code, output factor or None) or None (scope: 0 for the header's factor, else the
+    line of the last event whose SYS / SCALE FACTOR names the code or all its system's types): the value a converter applying that shift must write,
+    made from this (input) phase value of a flag 0/1 record and stored under the output's factor
+    (rounded, clipped: see add), counted in ``adjusted`` (sys, target code, shift),
+    ``adjust_rounded`` and ``adjust_clipped``; with adjust or norm, every phase value of flags
+    0/1 is written as a normalised number, so a shifted value and the output's compare by value
+    (--align-phases: compare_obs). A flag 6 (cycle slip) phase value is shown to adjust with
+    slip=True and kept as it is.
+
+    factors: a dict filled with {(epoch, sat, code, is flag 6): the factor} for every phase
+    value of flags 0, 1 and 6 (the output's: compare_obs gives them to adjust).
 
     Records are keyed by epoch and satellite so that identical records compare in one
     step; the comparator expands only records that differ."""
@@ -250,8 +308,11 @@ def obs_tokens(lines, v3_lli=False, exact=False, drop=None):
     classes = {}
     wl = {"*": (1, 1)}
     scale = {}
+    scope_at = {}                  # (sys, code or '*') -> line of the last event with its factor
     if v3:
         _scale_update(scale, [l for l in head if l[60:80].strip() == "SYS / SCALE FACTOR"])
+    else:
+        _v2_scale_update(scale, [l for l in head if l[60:80].strip() == "OBS SCALE FACTOR"])
     if v3_lli:
         for l in head:
             if l[60:80].strip() == "WAVELENGTH FACT L1/2":
@@ -302,8 +363,41 @@ def obs_tokens(lines, v3_lli=False, exact=False, drop=None):
             if fac is not None and code in ("L1", "L2") and fac[int(code[1]) - 1] == 2:
                 b = (int(lli) if lli.strip() else 0) ^ 2
                 lli = str(b) if b or lli.strip() else " "     # a written LLI stays written ('0')
-            sf = (scale.get((sysc, code)) or scale.get((sysc, "*"))) if scale else None
+            sf = (scale.get((sysc, code)) or scale.get((sysc, "*")) or scale.get(("", code))
+                  or scale.get(("", "*"))) if scale else None
             val = _physical(v.strip(), sf) if sf and sf != 1 else _lead0(v.strip())
+            if code[:1] == "L" and factors is not None and (key[2] <= 1 or key[2] == 6):
+                factors[(key[0], key[1], code, key[2] == 6)] = Decimal(sf) if sf else Decimal(1)
+            # the scope of a code's factor: the header (0), then from each event whose SYS / SCALE
+            # FACTOR names the code or all its system's types (rinex305.txt section 6.5)
+            scope = max(scope_at.get((sysc, code), 0), scope_at.get((sysc, "*"), 0)) if scope_at else 0
+            if code[:1] == "L" and key[2] == 6 and adjust is not None:
+                adjust(sysc, code, key[1], key[0], Decimal(v.strip()), sf or Decimal(1), True, scope)
+            if code[:1] == "L" and key[2] <= 1 and (adjust is not None or norm):
+                # --align-phases: the value the output must hold, from this (input) value moved by
+                # a known shift (cycles), stored under the output's own factor for it (its SYS /
+                # SCALE FACTOR, from the output's tokens), rounded half-even to F14.3's 3 decimals,
+                # and past F14.3 clipped by 1e9 with LLI bit 0 set (rinex305.txt section 6.7;
+                # rinex211.txt Table A2); phases compare as numbers
+                fin = sf if sf else Decimal(1)
+                r = (adjust(sysc, code, key[1], key[0], Decimal(v.strip()), fin, False, scope)
+                     if adjust is not None else None)
+                if r:
+                    d, tcode, fout = r
+                    fo = fout or fin
+                    x = (Decimal(v.strip()) / fin + d) * fo
+                    q = x.quantize(_Q3, rounding=ROUND_HALF_EVEN)
+                    if q != x:
+                        codes.adjust_rounded[(sysc, tcode)] += 1
+                    t = f"{q:.3f}"
+                    if len(t.replace("0.", ".", 1) if t.lstrip("-").startswith("0.") else t) > 14:
+                        q = q - 10 ** 9 if q > 0 else q + 10 ** 9
+                        lli = str((int(lli) if lli.strip() else 0) | 1)
+                        codes.adjust_clipped[(sysc, tcode)] += 1
+                    if d:
+                        codes.adjusted[(sysc, tcode, d)] += 1
+                    val = str(q / fo)
+                val = f"{Decimal(val).normalize():f}"
             items.append((cls(sysc, code), val, lli, f[15]))
         items.sort()
         old = recs.get(key)
@@ -319,9 +413,15 @@ def obs_tokens(lines, v3_lli=False, exact=False, drop=None):
         if v3:
             flag = int(l[29:32])
             ns = int(l[32:35])
+            # EPOCH record (rinex305.txt Table A3 p.59, rinex_4.02.txt Table A3): 6X reserved
+            # at columns 36-41, nothing after column 62 (the 4.02 picosecond field), and
+            # before 4.02 nothing after column 56 (no picosecond field there)
+            ps4 = vkey >= "4.02"
+            if l[35:41].strip() or l[62:].strip() or (not ps4 and l[56:62].strip()):
+                codes.skipped += 1
             ep = None if not l[2:29].strip() else _epoch(l[2:6], l[7:9], l[10:12], l[13:15], l[16:18],
                                                          l[18:29])
-            if ep is not None and l[57:62].strip():
+            if ep is not None and ps4 and l[57:62].strip():
                 ep = ep[:5] + ((ep[5] + Decimal(l[57:62]) * Decimal("1e-12")).normalize(),)
             i += 1
             if 2 <= flag <= 5:
@@ -337,13 +437,16 @@ def obs_tokens(lines, v3_lli=False, exact=False, drop=None):
                 if changed:
                     snap()
                 sf_lines = [lines[i + k] for k in range(ns) if lines[i + k][60:80].strip() == "SYS / SCALE FACTOR"]
-                if sf_lines and flag in (3, 4):
-                    _scale_update(scale, sf_lines)
+                if sf_lines and 2 <= flag <= 5:
+                    for g in _scale_update(scale, sf_lines):
+                        scope_at[g] = i          # (sys, code or '*'): this event's from here on
                 i += ns
                 continue
             for k in range(ns):
                 d = lines[i + k]
                 sat = d[0] + "%02d" % int(d[1:3])
+                if d[3 + 16 * len(types.get(sat[0], [])):].strip():
+                    codes.skipped += 1            # past the last declared field
                 add((ep, sat, flag), sat[0], types.get(sat[0], []), d, 3)
             i += ns
         else:
@@ -352,6 +455,10 @@ def obs_tokens(lines, v3_lli=False, exact=False, drop=None):
             ns = int(l[29:32]) if l[29:32].strip() else 0
             ep = None if not l[0:26].strip() else _epoch(l[1:3], l[4:6], l[7:9], l[10:12], l[13:15],
                                                          l[15:26])
+            # EPOCH/SAT or EVENT FLAG record (rinex211.txt Table A2): 80 columns; an event has
+            # no satellite list (columns 33-68), only the optional clock at 69-80
+            if l[80:].strip() or (2 <= flag <= 5 and l[32:68].strip()):
+                codes.skipped += 1
             i += 1
             if 2 <= flag <= 5:
                 changed = False
@@ -364,6 +471,9 @@ def obs_tokens(lines, v3_lli=False, exact=False, drop=None):
                         v2types += hl[6:60].split()
                     elif v3_lli and hl[60:80].strip() == "WAVELENGTH FACT L1/2":
                         _wl_update(wl, hl)
+                sf_lines = [lines[i + k] for k in range(ns) if lines[i + k][60:80].strip() == "OBS SCALE FACTOR"]
+                if sf_lines and 2 <= flag <= 5:
+                    _v2_scale_update(scale, sf_lines)
                 if changed:
                     snap()
                 i += ns
@@ -378,9 +488,15 @@ def obs_tokens(lines, v3_lli=False, exact=False, drop=None):
                     sats.append((sv[0] if sv[0] != " " else single) + "%02d" % int(sv[1:3]))
                 if len(sats) < ns:
                     sl = lines[i].ljust(80)
+                    if sl[68:].strip():
+                        codes.skipped += 1        # continuation: 32X,12(A1,I2) ends at 68
                     i += 1
             per = max(1, (len(v2types) + 4) // 5)
+            last = 16 * len(v2types) - 80 * (per - 1)
             for sat in sats:
+                # 5 fields of 16 columns per line; the last line ends after the last type's
+                codes.skipped += sum(1 for k in range(per)
+                                     if lines[i + k][80 if k < per - 1 else last:].strip())
                 rec = "".join(lines[i + k][:80].ljust(80) for k in range(per))
                 i += per
                 add((ep, sat, flag), sat[0], v2types, rec, 0)
@@ -407,9 +523,9 @@ def nav_tokens(lines):
     i = end + 1
     n = len(lines)
 
-    def start(key, msg, vals):
+    def start(key, msg, vals, parsed=None):
         nonlocal cur
-        cur = [_num(x) for x in vals]
+        cur = parsed if parsed is not None else [_num(x) for x in vals]
         recs.setdefault(key, []).append((msg, cur))
 
     while i < n:
@@ -423,12 +539,22 @@ def nav_tokens(lines):
             sat = t[1][0] + ("%02d" % int(t[1][1:]) if len(t[1]) > 1 else "  ")
             body = lines[i + 1].ljust(80)
             ep = _epoch(body[4:8], body[9:11], body[12:14], body[15:17], body[18:20], body[21:23])
-            vals = [] if kind == "STO" else [body[23 + 19 * k:42 + 19 * k] for k in range(3)]
-            if kind == "STO":
-                vals = ["", "", ""]
             # message type, with the 4.02 subtype when there is one (e.g. 'CNVX WIDE': the
             # coefficient area, rinex_4.02.txt Table 25 p.40)
-            start((kind, sat, ep), " ".join(t[2:4]), vals)
+            msg = " ".join(t[2:4])
+            if kind == "STO":
+                # line 0 after the epoch: time-offset code, SBAS ID and UTC ID, 1X,A18 each
+                # (rinex_4.02.txt Table A33 p.115), held in the three line-0 positions as text
+                # (None: blank), so a changed or added identifier is a difference (round 32)
+                start((kind, sat, ep), msg, None,
+                      [body[24 + 19 * k:42 + 19 * k].strip() or None for k in range(3)])
+            else:
+                bsat = body[0:1] + ("%02d" % int(body[1:3]) if body[1:3].strip().isdigit() else body[1:3])
+                if kind == "EPH" and bsat != sat:
+                    # the body's own satellite (A1,I2.2: Table A9) must be the header line's;
+                    # a mismatch is kept in the message type, so it shows as a difference
+                    msg += f" !BODY:{body[0:3]}"
+                start((kind, sat, ep), msg, [body[23 + 19 * k:42 + 19 * k] for k in range(3)])
             i += 2
             continue
         l = l.ljust(80)

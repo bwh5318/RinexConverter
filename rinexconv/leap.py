@@ -21,6 +21,9 @@ transmitted by the GPS almanac or since 1-Jan-2006 as transmitted by BDS almanac
 (rinex302.txt Table A5 p.63): the caller says which (basis="BDS" for a BeiDou-only file).
 """
 
+import re
+
+from rinexcore.errors import CorruptError
 from rinexcore.header import HeaderRecord
 
 BDT_LEAP_OFFSET = 14
@@ -49,32 +52,84 @@ def holds_bdt(version):
 
 def _int(s):
     s = s.strip()
-    return int(s) if s.lstrip("+-").isdigit() else None
+    return int(s) if re.fullmatch(r"[+-]?[0-9]+", s) else None    # (not isdigit: '²' is a digit to it)
 
 
-def known(x):
+def malformed(content):
+    """Why a LEAP SECONDS content cannot be read, or None: the 4I6 fields must each be blank or
+    an integer, columns 25-27 blank or a time system identifier (GPS, BDT, BDS: rinex305.txt
+    Table A2/A5, rinex303.txt p.60), and nothing after them (Sonnet round 31: a record a column
+    off read 'T' as its identifier and ended in an internal error going to 4.02; '4a' and
+    other text in a field was dropped to blank without a word)."""
+    c = content.ljust(60)[:60]
+    for k in range(4):
+        f = c[6 * k:6 * k + 6]
+        if f.strip() and _int(f) is None:
+            return f"field {k + 1} {f.strip()!r} is not a number (I6)"
+    if c[24:27].strip() and c[24:27] not in ("GPS",) + BEIDOU_IDS:
+        return f"columns 25-27 {c[24:27]!r} are not a time system identifier (GPS, BDT or BDS)"
+    if c[27:60].strip():
+        return f"text after the fields: {c[27:60].strip()!r}"
+    return None
+
+
+def check(rec, sv, tv):
+    """Refuse (CorruptError HDR.LEAP) a LEAP SECONDS record that cannot be read when it has to
+    be rewritten for another version; a same-version conversion carries it as written."""
+    why = malformed(rec.content)
+    if why and tv != sv:
+        raise CorruptError(f"LEAP SECONDS cannot be read: {why}; it cannot be converted to RINEX {tv}",
+                           line=getattr(rec, "lineno", None), rule="HDR.LEAP")
+    return why is None
+
+
+def known(x, zero_is_value=False):
     """A LEAP SECONDS field that says something: "Zero or blank if not known" (rinex302.txt
     Table A5 p.63), so 0 and blank are unknown (Sol round 28: 0 became 14, '4 0 0 0' became
-    '18 14 1356 1')."""
-    return x is not None and x != 0
+    '18 14 1356 1'), except where zero_is_value(): there only blank is."""
+    return x is not None and (zero_is_value or x != 0)
 
 
-def _shift(content, ds, dw, dd):
+def zero_is_value(version, bds_terms):
+    """True where a 0 in a LEAP SECONDS field is a value: a field in BeiDou terms of a 3.03-3.05
+    record. 3.01/3.02 say "Zero or blank if not known" (rinex302.txt Table A2 p.55, Table A5
+    p.63). From 3.03 the fields after the count are "(BNK)", Blank if Not Known, a BeiDou day
+    is 0-6, and BDS weeks count from 1-Jan-2006 (rinex303.txt p.60, rinex304.txt p.65,
+    rinex305.txt Table A2 p.65 / Table A5); BDT-UTC was 0 s from 2006 to the end of 2008 (Sol
+    round 29: a 2007 '0 ... BDT' went to 4.02 as GPS 0, not 14). In GPS terms a 0 is never a
+    value of a GNSS-era file (GPS-UTC has been 1 s or more since 1981, GPS days are 1-7), so it
+    stays "not known" in every version."""
+    return bds_terms and "3.03" <= version < "4"
+
+
+def _shift(content, ds, dw, dd, zero_value=False):
     """The four fields shifted by ds seconds, dw weeks and dd days; an unknown field is kept as
-    written, and a day goes with its week (unknown when the week is)."""
+    written. Each field on its own: the fields are optional one by one (BNK), and a day is
+    BeiDou 0-6 against GPS 1-7 whether or not the week is given (rinex305.txt Table A5; Sol
+    round 30: '4 3 _ 2BDT' gave GPS day 2, not 3)."""
     c = content.ljust(60)
     cur, fut, wk, dn = (_int(c[6 * k:6 * k + 6]) for k in range(4))
-    vals = (cur + ds if known(cur) else cur, fut + ds if known(fut) else fut,
-            wk + dw if known(wk) else wk, dn + dd if known(wk) and dn is not None else dn)
+    kn = lambda x: known(x, zero_value)
+    vals = (cur + ds if kn(cur) else cur, fut + ds if kn(fut) else fut,
+            wk + dw if kn(wk) else wk, dn + dd if kn(dn) else dn)
     return "".join(" " * 6 if v is None else f"{v:6d}" for v in vals)
 
 
-def as_gps(content):
-    """The content of a BDT LEAP SECONDS record in GPS terms, or None if it is not BDT."""
+def _blank_zeros(content):
+    """The four fields with each 0 written blank, each field on its own."""
+    c = content.ljust(60)
+    f = [_int(c[6 * k:6 * k + 6]) for k in range(4)]
+    f = [None if x == 0 else x for x in f]
+    return "".join(" " * 6 if v is None else f"{v:6d}" for v in f) + c[24:60].rstrip()
+
+
+def as_gps(content, zero_value=False):
+    """The content of a BDT LEAP SECONDS record in GPS terms, or None if it is not BDT.
+    zero_value: its zeros are values (zero_is_value), shifted like any other."""
     c = content.ljust(60)
     if c[24:27].strip() not in BEIDOU_IDS:
         return None
-    return _shift(c, BDT_LEAP_OFFSET, BDT_WEEK_ZERO, 1) + "GPS"
+    return _shift(c, BDT_LEAP_OFFSET, BDT_WEEK_ZERO, 1, zero_value) + "GPS"
 
 
 def from_gps(content):
@@ -94,13 +149,21 @@ def for_target(rec, sv, tv, report, basis=None, out_basis=None):
     the BDS basis (rinex302.txt Table A5 p.63; navconv._leap_basis), so it is written so (Sol
     round 26: two BeiDou-only 3.02 files merged into 3.02 were written GPS 18, read back as
     BDS, so 32 in 4.02)."""
+    if not check(rec, sv, tv):
+        return rec                                 # unreadable, same version: as written
     c = rec.content
     ident = c.ljust(60)[24:27].strip()
     bds_terms = ident in BEIDOU_IDS or (basis == "BDS" and not ident)
+    zv = zero_is_value(sv, bds_terms)
     if basis == "BDS" and tv != sv and not ident:
         report.assume("leap-seconds-basis", "BDS", "rinex302-bds-only-navigation-file")
     if out_basis == "BDS" and tv != sv:
-        if not bds_terms:
+        if bds_terms and zv and any(_int(c.ljust(24)[6 * k:6 * k + 6]) == 0 for k in range(4)):
+            # a known 0 in BeiDou terms (3.03-3.05) reads "not known" in 3.02: written in GPS
+            # terms, whose count (14 or more) navconv._leap_basis reads back as GPS
+            c = as_gps(c.ljust(24)[:24] + "BDT", True)
+            report.rule("LEAP.BDT-TO-GPS")
+        elif not bds_terms:
             b = from_gps(c)
             g = [_int(c.ljust(24)[6 * k:6 * k + 6]) for k in range(4)]
             if any(known(x) and _int(b[6 * k:6 * k + 6]) == 0 for k, x in enumerate(g)):
@@ -120,8 +183,14 @@ def for_target(rec, sv, tv, report, basis=None, out_basis=None):
     if holds_bdt(tv) and ident in BEIDOU_IDS and ident != beidou_id(tv) and tv != sv:
         c = c.ljust(24)[:24] + beidou_id(tv) + c.ljust(60)[27:60].rstrip()
         report.rule("LEAP.BEIDOU-ID-SPELLING")
+    if holds_bdt(tv) and ident in BEIDOU_IDS and not zv and tv != sv:
+        # BeiDou terms whose zeros meant "not known" (a 3.02 BeiDou-only file) into a version
+        # where a BeiDou 0 is a value (zero_is_value): the zeros are written blank
+        if 0 in [_int(c.ljust(24)[6 * k:6 * k + 6]) for k in range(4)]:
+            c = _blank_zeros(c)
+            report.rule("LEAP.UNKNOWN-ZERO-BLANK")
     if not holds_bdt(tv):
-        g = as_gps(c)
+        g = as_gps(c, zv)
         if g is not None:
             if c != g and not any(w["rule"] == "LEAP.BDT-TO-GPS" for w in report.warnings):
                 report.warn("LEAP.BDT-TO-GPS", f"LEAP SECONDS in BDT written in GPS terms for RINEX {tv}: "

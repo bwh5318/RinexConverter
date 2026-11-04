@@ -38,29 +38,37 @@ def merged(primary, *others, **kw):
 
 class AreaPerSourceFile(unittest.TestCase):
     """Sol 1 and 3: --qzss-ion-area looked at the primary file's version only, and compared the
-    coefficients as text."""
+    coefficients as text. Round 32: a 4.00/4.01 record names its own area (Region code '0 or
+    blank (wide area parameters), 1 (QZSS only - Japan area coefficients)', rinex_4.00.txt Table
+    A32 l.5908 p.104), which wins over the option; the option labels sets without one."""
 
     def test_merged_400_records_get_the_area(self):
-        outs, rep = merged(payload(nav_v4("4.02")), nav400(), qzss_ion_area="WIDE")
-        out = outs[0].data.decode()
-        self.assertEqual(out.count("> ION J01 CNVX WIDE"), 2)     # the 4.02 file's own + the merged one
-        self.assertNotIn("nav-correction-not-representable:ION:CNVX-area-unknown:J", rep["losses"])
-        self.assertEqual([(a["detail"], a["count"]) for a in rep["assumptions"]
-                          if a["category"] == "qzss-ion-area"], [("WIDE", 1)])
-        self.assertEqual(V.errors(V.validate(outs[0].data)), [])
-        # without the option the merged record still goes, and is claimed
-        outs, rep = merged(payload(nav_v4("4.02")), nav400())
-        self.assertEqual(rep["losses"]["nav-correction-not-representable:ION:CNVX-area-unknown:J"]["count"], 1)
+        for area in ("WIDE", None):
+            with self.subTest(option=area):
+                outs, rep = merged(payload(nav_v4("4.02")), nav400(), qzss_ion_area=area)
+                out = outs[0].data.decode()
+                self.assertEqual(out.count("> ION J01 CNVX WIDE"), 2)     # the 4.02 file's own + the merged one
+                self.assertNotIn("nav-correction-not-representable:ION:CNVX-area-unknown:J", rep["losses"])
+                self.assertEqual([(a["detail"], a["count"]) for a in rep["assumptions"]
+                                  if a["category"] == "qzss-ion-area"], [])
+                self.assertEqual(V.errors(V.validate(outs[0].data)), [])
 
     def test_same_set_written_differently_is_one_set(self):
-        one = QzssIonArea.J_CNVX
-        other = [one[0], one[1].replace(d19(1e-8, "E"), " 0.100000000000E-07"), *one[2:]]
+        # QZSS LNAV sets of a 4.02 file name no area: the option labels them in 4.01
+        from .test_user_options import nav402_lnav, region_codes
+        one = nav402_lnav(1e-8)
+        k = one.index(b"> ION J01 LNAV")
+        other = one + one[k:].replace(d19(1e-8, "E").encode(), b" 0.100000000000E-07", 1)
         self.assertNotEqual(one, other)
-        outs, rep = convert(nav400(other), "4.02", qzss_ion_area="JAPN")   # was: InvocationError
-        self.assertEqual(outs[0].data.decode().count("> ION J01 CNVX JAPN"), 2)
-        different = [one[0], one[1].replace(d19(1e-8, "E"), d19(3e-8, "E"), 1), *one[2:]]
+        outs, rep = convert(other, "4.01", qzss_ion_area="JAPN")   # was: InvocationError
+        self.assertEqual(region_codes(outs[0].data), [" 1.000000000000E+00"] * 2)
         with self.assertRaises(InvocationError):
-            convert(nav400(different), "4.02", qzss_ion_area="JAPN")
+            convert(nav402_lnav(1e-8, 3e-8), "4.01", qzss_ion_area="JAPN")
+        # a 4.00 file's sets name their area: no contradiction, whatever the option says
+        one = QzssIonArea.J_CNVX
+        different = [one[0], one[1].replace(d19(1e-8, "E"), d19(3e-8, "E"), 1), *one[2:]]
+        outs, rep = convert(nav400(different), "4.02", qzss_ion_area="JAPN")
+        self.assertEqual(outs[0].data.decode().count("> ION J01 CNVX WIDE"), 2)
 
 
 class FlagOnlyFields(unittest.TestCase):

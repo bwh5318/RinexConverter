@@ -95,7 +95,12 @@ class CrxCannotHold(CorruptError):
     * CRX.ENC.PICOSEC: a RINEX 4.02 picosecond field (optional per epoch: rinex_4.02.txt
       Table A3) that stops part-way through the file; CRINEX 3.1 differences it from the
       previous epoch's, so CRX2RNX would repeat the last value (section 6 of
-      docs/HATANAKA.md)."""
+      docs/HATANAKA.md).
+    * CRX.ENC.FIELD (only for a field that reads as an F14.3 number): a value written with
+      its point elsewhere than column 11 or with other than three decimals (`1050010.1`).
+      RNX2CRX reads the digits around a point in column 11 (E:627-671), so it cannot take
+      it; the value text is kept as written everywhere else (rinexcore.obs), so it is not
+      rewritten here either (_field_error)."""
 
     def __init__(self, message, *, plain_rule, **kw):
         super().__init__(message, **kw)
@@ -840,8 +845,16 @@ _RE_TEXT = re.compile(rb"[\x20-\x25\x27-\x7e]*")
 _FLAG_OK = bytes(c for c in range(0x20, 0x7f) if c != 0x26)
 
 
+_RE_READABLE = re.compile(rb" *[+-]?(?:\d+\.?\d*|\.\d+) *| *")
+
+
 def _field_error(body, line_no):
-    """Raise CRX.ENC.FIELD for the first field that is not F14.3 + LLI + SSI."""
+    """Raise CRX.ENC.FIELD for the first field that is not F14.3 + LLI + SSI as RNX2CRX
+    writes it (point in column 11, three decimals). A field that reads as an F14.3 number
+    all the same (`   1050010.1  `, `+1.5`: Fortran F14.3 input takes an explicit point
+    anywhere; rinexcore.obs keeps value text as written) is valid RINEX that RNX2CRX cannot
+    take: CrxCannotHold, so the converter writes plain RINEX with warning
+    OBS.CRX.FIELD-PLAIN (round 32: a valid input was refused-corrupt with --crx)."""
     for k in range(0, len(body), 16):
         c = body[k:k + 16]
         bad = _RE_F1.fullmatch(c) is None
@@ -851,8 +864,13 @@ def _field_error(body, line_no):
             except ValueError:
                 bad = True
         if bad:
-            raise _corrupt(f"abnormal data field {c!r} (not F14.3 + LLI + SSI)", line_no,
-                           "CRX.ENC.FIELD")
+            msg = f"abnormal data field {c!r} (not F14.3 + LLI + SSI)"
+            f = c.ljust(16)
+            if _RE_READABLE.fullmatch(f[:14]) and not f[14:16].strip(b" 0123456789"):
+                raise CrxCannotHold(msg + ": an F14.3 value RNX2CRX cannot take (it needs the "
+                                    "point in column 11 and three decimals)", line=line_no,
+                                    rule="CRX.ENC.FIELD", plain_rule="OBS.CRX.FIELD-PLAIN")
+            raise _corrupt(msg, line_no, "CRX.ENC.FIELD")
     raise _corrupt("abnormal data field", line_no, "CRX.ENC.FIELD")
 
 
@@ -1090,6 +1108,13 @@ def _encode(data, program, date, out):
             ctext = c[p_clock:]
             text = c[:p_clock]
             if not re_clock.fullmatch(ctext):
+                if _RE_READABLE.fullmatch(ctext):
+                    # a readable value in other digits (a RINEX 2 ' 123.4567890' carried as
+                    # written: rinexconv.obsconv._clock_v2): valid RINEX that RNX2CRX cannot
+                    # take (read_clock wants the point in column 3 of the field, E:530-543)
+                    raise CrxCannotHold(f"receiver clock {ctext!r} is not F12.9 (RINEX 2) / F15.12 "
+                                        "(RINEX 3/4), which RNX2CRX needs", line=ln,
+                                        rule="CRX.ENC.CLOCK", plain_rule="OBS.CRX.CLOCK-PLAIN")
                 fail(f"receiver clock {ctext!r} is not F12.9 (RINEX 2) / F15.12 "
                      "(RINEX 3/4)", ln, "CLOCK")
             neg = b"-" in ctext[:2]

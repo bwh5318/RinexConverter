@@ -5,11 +5,13 @@ RinexError subclasses. Invocation/I-O failures raise InvocationError and are
 never reported as refused-corrupt.
 """
 
+import contextlib
 import dataclasses
 import hashlib
 import os
 import re
 import tempfile
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +35,7 @@ from .report import Report
 
 # warnings that describe the input being off spec (refused under --strict)
 STRICT_WARNINGS = {"OBS.NONSTANDARD-CODE", "OBS.GLONASS-SLOTS-INCOMPLETE", "OBS.PHASESHIFT.NONSTANDARD",
-                   "NAV.HDR.TIMECORR.LAYOUT"}
+                   "NAV.HDR.TIMECORR.LAYOUT", "NAV.GLO.TK-DAY-BASIS", "OBS.CLOCK.NOT-F12.9"}
 WRITE_VERSIONS = ("2.10", "2.11", "3.00", "3.01", "3.02", "3.03", "3.04", "3.05", "4.00", "4.01", "4.02")
 READ_VERSIONS = ("2.00", "2.01", "2.10", "2.11", "2.12") + WRITE_VERSIONS[2:]
 
@@ -48,6 +50,7 @@ class Options:
     overrides: dict = field(default_factory=dict)
     drop_unresolvable: bool = False
     assume_phase_aligned: bool = False
+    align_phases: bool = False                       # PLAN 3.3 rules 2/3: 3.00, 3.02-3.05 targets
     dedupe: bool = False
     crx: bool = None                                 # None: keep the input's Hatanaka state
     compression: str = "keep"                        # keep | none | gz | Z
@@ -57,7 +60,7 @@ class Options:
     leap_seconds: int = None
     approx_position: tuple = None
     approx_position_zero: bool = False               # teqc's 0 0 0 placeholder (reported)
-    qzss_ion_area: str = None                        # WIDE | JAPN for 4.00/4.01 -> 4.02 CNVX ION
+    qzss_ion_area: str = None                        # WIDE | JAPN: QZSS ION sets without an area, to 4.00/4.01
     auto_nav: bool = True                           # CLI: same-day GLONASS nav next to the input
     merge: list = field(default_factory=list)        # extra nav inputs merged into one output
 
@@ -115,7 +118,18 @@ def check_options(opts):
     """Option values the writers cannot take are invocation errors, not internal ones (Sol
     round 15: --approx-position NaN or 1e9 escaped as AssertionError / OverflowError).
     APPROX POSITION XYZ is 3F14.4 (rinex305.txt Table A2, rinex211.txt Table A1)."""
-    _norm_target(opts.target)
+    target = _norm_target(opts.target)
+    if opts.align_phases:
+        # the user's decision (2026-11-02, 'old versions only'): only the RINEX 3 versions with
+        # a shift table (3.02 Table A19, 3.03-3.05 Table A23) and 3.00 (undoing recorded shifts,
+        # PLAN 3.3 rule 3); 3.01 has no table, RINEX 4 tables no values, RINEX 2 no record
+        if target != "3.00" and not "3.02" <= target <= "3.05":
+            raise InvocationError(f"--align-phases works for RINEX 3.00 and 3.02-3.05 targets, not {target} "
+                                  "(the user's decision, 2026-11-02: 3.01 has no shift table, the RINEX 4 "
+                                  "tables give no values); for RINEX 4, --assume-phase-aligned is the option")
+        if opts.assume_phase_aligned:
+            raise InvocationError("--align-phases (the source is unaligned: apply the table's shifts) and "
+                                  "--assume-phase-aligned (the source is aligned) contradict each other")
     if opts.approx_position is not None:
         import math
         xyz = tuple(opts.approx_position)
@@ -210,6 +224,7 @@ def _convert_loaded(ld, name, target, opts, rep):
         oo = ObsOptions(lenient=opts.lenient, strict=opts.strict, overrides=opts.overrides,
                         drop_unresolvable=opts.drop_unresolvable,
                         assume_phase_aligned=opts.assume_phase_aligned,
+                        align_phases=opts.align_phases,
                         keep_v2_nonstandard=opts.keep_v2_nonstandard,
                         keep_lli_bit2=opts.keep_lli_bit2,
                         approx_position=opts.approx_position,
@@ -246,8 +261,12 @@ def _convert_loaded(ld, name, target, opts, rep):
                     if bad:
                         raise CorruptError(f"--strict: the input fails validation ({bad[0].message})",
                                            line=bad[0].line, rule=bad[0].rule)
-            except RinexError as e:
+            except CorruptError as e:
                 raise CorruptError(f"merge input {p}: {e}", rule="NAV.MERGE.INPUT") from None
+            except RinexError as e:
+                # keep the refusal's own outcome (round 32: a missing-information or
+                # not-representable refusal of a merge input was reported as refused-corrupt)
+                raise _same_refusal(e, f"merge input {p}: {e}") from None
             for n in getattr(mld.model, "notes", []):
                 rep.repair(n["rule"], f"merge input {p}: {n['message']}", n.get("line"))
             # each input's version: a loss of one input's records is judged by its own version
@@ -554,10 +573,17 @@ def _nine_char_id(model, site, rep):
 
 
 def _marker(model, full=False):
+    """MARKER NAME, or its first four characters as a RINEX 2 file name's station id
+    ("ssss: 4-character station name designator", rinex211.txt section 4) only when they are
+    letters and digits: anything else ('../x', 'A B', 'C:x') names no station, and must never
+    become part of a path (Sol round 29: '../x' was written as ../x2740.26o)."""
+    import re
     for r in getattr(model, "header", []):
         if r.label == "MARKER NAME":
             v = r.content[:60].strip()
-            return v if full else v[:4]
+            if full:
+                return v
+            return v[:4] if re.fullmatch(r"[A-Za-z0-9]{1,4}", v[:4]) else None
     return None
 
 
@@ -589,31 +615,303 @@ def _first_time(kind, model):
     return t[0], d.timetuple().tm_yday
 
 
-def write_output(out, out_dir, force=False, inputs=()):
-    """Write atomically; a partial output is never left looking complete (PLAN §1.1)."""
+def _check_output_name(name, what="output"):
+    """An output or report name must be one plain file name (names.unsafe_file_name: no folder
+    part, drive, '..' or stream, no control character, no trailing dot or blank, no Windows
+    device name such as CON, NUL.26o or COM¹). Names come from the input's name and its header
+    (MARKER NAME), which a file may fill with anything (Sol rounds 29-30), so this is checked
+    before anything is written."""
+    why = names.unsafe_file_name(name)
+    if why:
+        raise InvocationError(f"unsafe {what} file name {names.shown(name)} ({why}; it comes from the "
+                              "input's name or header)")
+
+
+def safe_path(out_dir, name, what="output"):
+    """out_dir / name, after checking that name is a safe file name and that the path resolves
+    inside out_dir (which must exist)."""
+    _check_output_name(name, what)
+    d = Path(out_dir)
+    target = d / name
+    try:
+        inside = target.resolve().parent == d.resolve()
+    except OSError:
+        inside = False
+    if not inside:
+        raise InvocationError(f"{what} name {names.shown(name)} would be written outside {d}")
+    return target
+
+
+def _same_refusal(e, message):
+    """A refusal of the same class (and outcome) as `e`, with a new message."""
+    from rinexcore.errors import MissingInformationError
+    if isinstance(e, MissingInformationError):
+        return MissingInformationError(message, missing=e.missing)
+    if isinstance(e, NotRepresentableError):
+        return NotRepresentableError(message)
+    return CorruptError(message)
+
+
+def _output_dir(out_dir):
     d = Path(out_dir)
     try:
         d.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise InvocationError(f"cannot create output directory {d}: {e}") from None
-    target = d / out.name
+    return d
+
+
+def lock_path(d):
+    """The lock file for output folder d: in the system temp folder, named by a hash of d's
+    resolved path, so every process writing d uses the same file and d itself stays clean."""
+    key = os.path.normcase(str(Path(d).resolve()))
+    h = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+    return Path(tempfile.gettempdir()) / "rinexconv-locks" / (h + ".lock")
+
+
+_HELD = threading.local()                 # lock paths this thread holds -> depth
+
+
+@contextlib.contextmanager
+def output_locks(dirs):
+    """output_lock for each distinct folder of dirs, taken in one fixed order (by lock file
+    name) so that two writers needing the same folders cannot deadlock. The CLI holds the
+    output and the report folder this way for one input's whole transaction (round 36, Sol:
+    outputs and report published separately could pair one job's outputs with another's
+    report)."""
+    with contextlib.ExitStack() as stack:
+        for p, d in sorted({str(lock_path(d)): d for d in dirs}.items()):
+            stack.enter_context(output_lock(d))
+        yield
+
+
+@contextlib.contextmanager
+def output_lock(d):
+    """Hold an exclusive operating-system lock for output folder d (lock_path; msvcrt.locking
+    on Windows, fcntl.flock elsewhere) while a set is written into it. The OS drops the lock
+    when the process ends, so a killed run never blocks the next one; the (empty) lock file is
+    kept, since removing it would let two runs lock two different files. A thread that already
+    holds the lock takes it again without waiting (re-entrant)."""
+    p = lock_path(d)
+    held = getattr(_HELD, "paths", None)
+    if held is None:
+        held = _HELD.paths = {}
+    if held.get(str(p)):
+        held[str(p)] += 1
+        try:
+            yield
+        finally:
+            held[str(p)] -= 1
+        return
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(p), os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0))
+    except OSError as e:
+        raise InvocationError(f"cannot create the output lock {p}: {e}") from None
+    try:
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                os.lseek(fd, 0, os.SEEK_SET)
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)   # retries for about 10 s, then raises
+                    break
+                except OSError:
+                    continue                                # another writer still holds it
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        held[str(p)] = 1
+        try:
+            yield
+        finally:
+            held.pop(str(p), None)
+            try:
+                if os.name == "nt":
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
+
+
+def _output_target(out, d, force, inputs):
+    """The checked path for `out` in folder d: a safe name inside d, not one of the inputs,
+    and not an existing file unless force. Something there that is not a plain file (a
+    folder, say) is never replaced, --force or not (round 33: a folder with an output's name
+    was moved aside with its contents)."""
+    _check_output_name(out.name)
+    target = safe_path(d, out.name)
     for i in inputs:
         try:
             if target.resolve() == Path(i).resolve():
                 raise InvocationError(f"output {target} would overwrite its input")
         except OSError:
             pass
+    if target.exists() and not target.is_file():
+        raise InvocationError(f"output {names.shown(str(target), 120)} exists and is not a file")
     if target.exists() and not force:
-        raise InvocationError(f"output {target} exists (use --force to overwrite)")
-    fd, tmp = tempfile.mkstemp(prefix=".rinexconv-", dir=str(d))
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(out.data)
-        os.replace(tmp, target)
-    except OSError as e:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise InvocationError(f"cannot write {target}: {e}") from None
+        raise InvocationError(f"output {names.shown(str(target), 120)} exists (use --force to overwrite)")
     return target
+
+
+def _unlink(p):
+    try:
+        os.unlink(p)
+    except OSError:
+        pass
+
+
+def write_output(out, out_dir, force=False, inputs=()):
+    """Write atomically; a partial output is never left looking complete (PLAN §1.1)."""
+    return write_outputs([out], out_dir, force, inputs)[0]
+
+
+def write_outputs(outs, out_dir, force=False, inputs=()):
+    """Write the outputs of one input as a set (PLAN §1 clause 1: a partial output is deleted,
+    never left looking complete). Every target is checked before anything is written, so one
+    that exists (without --force) or has an unusable name stops the set before its first file
+    (round 32: a RINEX 4 nav file split into RINEX 2 n/g/h files was left with only the n file
+    when the g file existed); each file goes to a temporary file in the output folder first,
+    and only when all are written are they renamed into place. If a rename fails, the files
+    of the set already renamed are removed again, and a file that --force was replacing is put
+    back as it was (round 33, Sol: the rollback deleted it): an existing target is first
+    renamed aside, and the copies aside are deleted only when the whole set is in place.
+
+    Without force every name is reserved first by creating it exclusively (O_EXCL), so of two
+    jobs that write the same name at once (--jobs, inputs of the same name from different
+    folders) one wins and the other gets "exists"; a check followed by a rename could not stop
+    the second job replacing the first one's file (round 34, Sol). A reserved name is an empty
+    file until its rename, and it is removed if the set fails.
+
+    The whole transaction (checks, reservations, renames, rollback) runs under an operating-
+    system lock on the output folder (output_lock), so two transactions in one folder never
+    interleave, from --jobs workers or from separate runs: with --force one whole set then
+    replaces the other, never a mix of the two (round 35, Sol: one job's rollback put an old
+    file back over another job's finished output). An interruption (Ctrl-C) during the renames
+    rolls the set back as a failed rename does (round 35, checks reviewer)."""
+    for o in outs:
+        _check_output_name(o.name)        # before the folder is created
+    d = _output_dir(out_dir)
+    with output_lock(d):
+        return _write_set(outs, d, force, inputs)
+
+
+def _write_set(outs, d, force, inputs):
+    targets = [_output_target(o, d, force, inputs) for o in outs]
+    seen = set()
+    for t in targets:
+        key = os.path.normcase(str(t.resolve()))
+        if key in seen:
+            raise InvocationError(f"two outputs of one input have the same name {names.shown(t.name)}")
+        seen.add(key)
+    reserved = []                         # names this call created empty (no --force)
+    tmps = []
+    journal = []                          # [target, old or None, tmp], one per rename step
+    committed = False
+    try:
+        if not force:
+            _reserve(targets, reserved)
+        for o in outs:
+            try:
+                fd, tmp = tempfile.mkstemp(prefix=".rinexconv-", dir=str(d))
+            except OSError as e:          # (Sol round 31: escaped as OSError)
+                raise InvocationError(f"cannot write in {d}: {e}") from None
+            tmps.append(tmp)
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(o.data)
+            except OSError as e:
+                raise InvocationError(f"cannot write {d / o.name}: {e}") from None
+        for tmp, target in zip(tmps, targets):
+            # each step is journalled before anything is renamed, and _undo_step judges from
+            # the files how far it got and is safe to repeat, so an interruption between any
+            # two operations, the undo included, leaves the folder as it was (rounds 36-37, Sol)
+            step = [target, None, tmp]
+            journal.append(step)
+            try:
+                if force and target.exists():     # without force it is our own reservation
+                    step[1] = tmp + ".old"        # a unique name: tmp is from mkstemp
+                    os.replace(target, step[1])
+                os.replace(tmp, target)
+            except OSError as e:
+                n = len(journal) - 1
+                lost = _undo_all(journal)
+                more = f"; {n} file(s) of the set already written were removed" if n else ""
+                if lost:
+                    more += "; could not put back " + ", ".join(f"{t} (kept as {o})" for t, o in lost)
+                raise InvocationError(f"cannot write {target}: {e}{more}") from None
+        committed = True
+        for _, old, _ in journal:
+            if old:
+                _unlink(old)
+    except BaseException:
+        if not committed:                 # e.g. Ctrl-C between two renames
+            _undo_all(journal)
+            for t in reserved:            # names reserved but never filled (still empty)
+                try:
+                    if t.stat().st_size == 0:
+                        _unlink(t)
+                except OSError:
+                    pass
+        else:                             # the set is in place: finish removing the old copies
+            for _, old, _ in journal:
+                if old:
+                    _unlink(old)
+        raise
+    finally:
+        for tmp in tmps:
+            if os.path.exists(tmp):
+                _unlink(tmp)
+    return targets
+
+
+def _reserve(targets, reserved):
+    """Create each target exclusively (an empty file), or raise InvocationError. Each name is
+    added to `reserved` before it is created and taken out again if the create fails, so the
+    caller's clean-up knows every name this call may have created, whenever it is interrupted
+    (round 37); the clean-up removes only names that are still empty."""
+    for t in targets:
+        reserved.append(t)
+        try:
+            # 'x': create exclusively (O_EXCL); the with block closes the handle whatever
+            # interrupts it, so the clean-up can delete the file (Windows cannot delete an
+            # open one)
+            with open(t, "xb"):
+                pass
+        except FileExistsError:
+            reserved.pop()                # not ours
+            raise InvocationError(f"output {names.shown(str(t), 120)} exists (use --force to overwrite)") from None
+        except OSError as e:
+            reserved.pop()
+            raise InvocationError(f"cannot write {t}: {e}") from None
+
+
+def _undo_step(step):
+    """Undo one journalled rename step [target, old or None, tmp], judged only by the files, so
+    that doing it twice does no harm (round 37, Sol: an interruption between recording a step
+    and clearing it undid it twice and deleted the old file it had just put back). A step that
+    replaced an old file: put the copy aside back if it is still aside (its 'old' path exists;
+    once back, nothing is left to do). A step with no old file: remove the new file if it is in
+    place (tmp is gone). Returns [(target, aside)] for an old file that could not be put back."""
+    target, old, tmp = step
+    try:
+        if old is not None:
+            if os.path.exists(old):
+                os.replace(old, target)
+        elif not os.path.exists(tmp):
+            _unlink(target)
+    except OSError:
+        return [(target, old)]
+    return []
+
+
+def _undo_all(journal):
+    """Undo every journalled step, newest first; safe to repeat."""
+    lost = []
+    for step in reversed(journal):
+        lost += _undo_step(step)
+    return lost

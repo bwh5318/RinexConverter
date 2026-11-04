@@ -108,6 +108,7 @@ class ObsFile:
         self.types = None        # ObsTypes from the header
         self.eol = "lf"
         self.notes = []          # reader repairs/warnings: dicts(rule, message, line)
+        self.skipped_text = 0    # data-section lines with text no field covers (_skipped)
         self._epochs = []        # a materialised list, or None while only the source is held
         self._source = None      # (payload bytes, data byte offset, data line number, lenient)
         self._read_once = False
@@ -403,6 +404,25 @@ def _note(notes, rule, message, line):
         notes.append({"rule": rule, "message": message, "line": line, "repair": True})
 
 
+def _skipped(f, notes, lineno):
+    """A data-section line holds non-blank text in columns no field of its record covers
+    (RINEX 2: past column 80, past the last declared observation field, columns 33-68 of an
+    event line, past column 68 of a satellite-list continuation: rinex211.txt Table A2;
+    RINEX 3/4: past the last field of a satellite record, the reserved columns 36-41 or past
+    column 62 of an EPOCH record, before 4.02 past column 56: rinex305.txt / rinex_4.02.txt
+    Table A3, the picosecond field being 4.02's). Only --lenient
+    gets this far (the validator calls it damage: engine._refuse_damage); the text is
+    dropped, every such line is counted once (ObsFile.skipped_text, claimed by the converter
+    as data-text-dropped) and the first is noted as a repair (PLAN section 1 clause 9:
+    '--lenient repairs what it can and reports each repair'; round 32)."""
+    if notes is None:
+        return                       # counted on the first read only
+    f.skipped_text += 1
+    if f.skipped_text == 1:
+        _note(notes, "OBS.DATA.SKIPPED-TEXT", "text in columns no field of the record covers "
+              "dropped (each such line is counted in loss data-text-dropped)", lineno)
+
+
 def _iter_v2(f, cur, lenient, notes):
     types = f.types
     ntypes = len(types.v2)
@@ -444,6 +464,11 @@ def _iter_v2(f, cur, lenient, notes):
                 raise CorruptError("epoch time missing", line=lineno, rule="OBS.EPOCH.TIME")
             t = None
         if 2 <= flag <= 5:
+            # the EPOCH/SAT or EVENT FLAG record keeps its receiver clock offset (F12.9,
+            # columns 69-80, optional: rinex211.txt Table A2) for events too
+            clock = _dec(line[68:80], "receiver clock offset", lineno, 69)
+            if line[32:68].strip() or line[80:].strip():
+                _skipped(f, notes, lineno)
             recs = []
             for _ in range(nsat):
                 x = cur.next()
@@ -451,8 +476,11 @@ def _iter_v2(f, cur, lenient, notes):
                     raise CorruptError("file ends inside an event record", line=cur.lineno,
                                        rule="OBS.TRUNCATED")
                 recs.append(HeaderRecord.from_line(x, cur.lineno))
-            ep = Epoch(t, flag, records=recs, types=types, lineno=lineno)
-            if flag in (3, 4):
+            ep = Epoch(t, flag, clock, records=recs, types=types, lineno=lineno)
+            # header records after every event flag 2-5 hold from there on ('Header records now
+            # allowed after all epoch flags >1', rinex211.txt section 0.4 l.241-242; rinex305.txt
+            # section 6.5 p.42); Astra round 39: only flags 3/4 were applied
+            if 2 <= flag <= 5:
                 newv2 = parse_v2_types(recs)
                 if newv2 is not None:
                     types = ObsTypes("v2", v2=newv2)
@@ -463,6 +491,8 @@ def _iter_v2(f, cur, lenient, notes):
             yield ep
             continue
         clock = _dec(line[68:80], "receiver clock offset", lineno, 69)
+        if line[80:].strip():
+            _skipped(f, notes, lineno)
         sats = []
         satfield = line[32:68]
         k = 0
@@ -485,6 +515,8 @@ def _iter_v2(f, cur, lenient, notes):
             if cont[0:32].strip():
                 raise CorruptError("expected a satellite-list continuation line", line=cur.lineno,
                                    rule="OBS.EPOCH.CONT")
+            if cont[68:].strip():
+                _skipped(f, notes, cur.lineno)
             satfield = cont[32:68]
         if not cur.has(nsat * nlines):
             if lenient:
@@ -492,11 +524,27 @@ def _iter_v2(f, cur, lenient, notes):
                 return
             raise CorruptError("file ends inside an epoch", line=cur.lineno, rule="OBS.TRUNCATED")
         data = []
+        last_w = width - 80 * (nlines - 1)       # columns of fields on a record's last line
         for _ in range(nsat):
             if nlines == 1:
                 rec = cur.next()
+                if lenient and len(rec) > width and rec[width:].strip():
+                    _skipped(f, notes, cur.lineno)
+                    rec = rec[:width]
             else:
-                rec = "".join(cur.next()[:80].ljust(80) for j in range(nlines))
+                parts = []
+                for j in range(nlines):
+                    x = cur.next()
+                    lim = 80 if j < nlines - 1 else last_w
+                    if len(x) > lim and x[lim:].strip():
+                        if lenient:
+                            # (it was cut at column 80 unreported: round 32)
+                            _skipped(f, notes, cur.lineno)
+                            x = x[:lim]
+                        elif x[80:].strip():
+                            _skipped(f, notes, cur.lineno)   # refused by the validator
+                    parts.append(x[:80].ljust(80))
+                rec = "".join(parts)
             if not _FIELDS_OK.fullmatch(rec):
                 _bad_field(rec, cur.lineno, 1)
             if len(rec) > width:
@@ -526,6 +574,7 @@ def _check_time(y, mo, dd, hh, mi, sec, lineno):
 def _iter_v3(f, cur, lenient, notes):
     types = f.types
     widths = {s: FIELD * len(c) for s, c in types.sys.items()}
+    ps_ok = f.version >= "4.02"
     blank_at = None
     while True:
         line = cur.next()
@@ -542,7 +591,14 @@ def _iter_v3(f, cur, lenient, notes):
         if line[0:1] != ">":
             raise CorruptError("expected an epoch record starting with '>'", line=lineno, column=1,
                                rule="OBS.EPOCH.START")
+        # reserved 6X, past the last field, or (before 4.02) the picosecond columns, which
+        # only RINEX 4.02 defines (rinex_4.02.txt Table A3; round 32: read as picoseconds in a
+        # 3.05 file under --lenient)
+        if line[35:41].strip() or line[62:].strip() or (not ps_ok and line[56:62].strip()):
+            _skipped(f, notes, lineno)
         line = line.ljust(62)
+        if not ps_ok:
+            line = line[:56] + " " * 6
         flag = _int(line[29:32], "epoch flag", lineno, 32)
         if flag is None or not 0 <= flag <= 6:
             raise CorruptError(f"bad epoch flag {line[29:32]!r}", line=lineno, column=32,
@@ -571,6 +627,9 @@ def _iter_v3(f, cur, lenient, notes):
                 raise CorruptError("epoch time missing", line=lineno, rule="OBS.EPOCH.TIME")
             t = None
         if 2 <= flag <= 5:
+            # the EPOCH record, shared by every flag, holds the receiver clock offset (F15.12,
+            # columns 42-56, optional: rinex305.txt Table A3 p.59; rinex_4.02.txt Table A3)
+            clock = _dec(line[41:56], "receiver clock offset", lineno, 42)
             recs = []
             for _ in range(nsat):
                 x = cur.next()
@@ -578,8 +637,8 @@ def _iter_v3(f, cur, lenient, notes):
                     raise CorruptError("file ends inside an event record", line=cur.lineno,
                                        rule="OBS.TRUNCATED")
                 recs.append(HeaderRecord.from_line(x, cur.lineno))
-            ep = Epoch(t, flag, records=recs, types=types, lineno=lineno)
-            if flag in (3, 4):
+            ep = Epoch(t, flag, clock, records=recs, types=types, lineno=lineno)
+            if 2 <= flag <= 5:                       # (every event flag: see _iter_v2)
                 new = parse_v3_types(recs)
                 if new:
                     merged = dict(types.sys)
@@ -609,6 +668,9 @@ def _iter_v3(f, cur, lenient, notes):
                 raise CorruptError(f"satellite {sat} has no SYS / # / OBS TYPES", line=i,
                                    rule="OBS.DATA.SYS")
             body = rec[3:]
+            if lenient and len(body) > w and body[w:].strip():
+                _skipped(f, notes, i)
+                body = body[:w]
             if not _FIELDS_OK.fullmatch(body):
                 _bad_field(body, i, 4)
             if len(body) > w:
@@ -636,11 +698,23 @@ def fmt_seconds(sec):
     return f"{whole:3d}.{frac:07d}", ps
 
 
-def fmt_clock(clock, width, decimals):
+def fmt_clock(clock, width, decimals, as_written=False):
     """Receiver clock offset (F12.9 / F15.12) without the leading zero below 1 s, as
-    RNX2CRX/CRX2RNX write it, so plain and Hatanaka outputs of a conversion are identical."""
+    RNX2CRX/CRX2RNX write it, so plain and Hatanaka outputs of a conversion are identical.
+    as_written (RINEX 2): a value with no Fw.d form is written with its own digits when they
+    fit the field (a ' 123.4567890' read from a RINEX 2 file: obsconv._clock_v2)."""
     from .header import fmt_f
-    s = fmt_f(clock, width, decimals).strip()
+    try:
+        s = fmt_f(clock, width, decimals).strip()
+    except OverflowError:
+        if not as_written:
+            raise
+        s = f"{Decimal(clock):f}"
+        if len(s.lstrip("-")) > 1 and s.lstrip("-").startswith("0."):
+            s = s.replace("0.", ".", 1)
+        if len(s) > width:
+            raise
+        return s.rjust(width)
     if s.startswith("0."):
         s = s[1:]
     elif s.startswith("-0."):
@@ -662,8 +736,10 @@ def epoch_line_v2(ep, sats):
     ids = [f"{s[0]}{int(s[1:]):2d}" for s in sats]
     first = "".join(ids[:12])
     line = line + first
-    if ep.clock is not None and ep.flag in (0, 1, 6):
-        line = line.ljust(68) + fmt_clock(ep.clock, 12, 9)
+    if ep.clock is not None:
+        # every flag: an event line keeps its clock too (rinex211.txt Table A2 gives the
+        # EPOCH/SAT or EVENT FLAG record one layout; columns 33-68 stay blank in an event)
+        line = line.ljust(68) + fmt_clock(ep.clock, 12, 9, as_written=True)
     out.append(line.rstrip())
     for k in range(12, len(ids), 12):
         out.append((" " * 32 + "".join(ids[k:k + 12])).rstrip())
@@ -680,7 +756,8 @@ def epoch_line_v3(ep, version):
         head = f"> {y:4d} {mo:02d} {d:02d} {h:02d} {mi:02d}{s}"
     nsat = len(ep.sats) if ep.flag in (0, 1, 6) else len(ep.records)
     line = f"{head}  {ep.flag:1d}{nsat:3d}"
-    if ep.flag in (0, 1, 6) and ep.clock is not None:
+    if ep.clock is not None:
+        # every flag: the EPOCH record of an event holds it too (rinex305.txt Table A3 p.59)
         line = line + " " * 6 + fmt_clock(ep.clock, 15, 12)
     if ps and version >= "4.02":
         line = line.ljust(56) + f" {ps:05d}"

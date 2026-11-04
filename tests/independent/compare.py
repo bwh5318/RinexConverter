@@ -6,6 +6,8 @@ problems; an empty list means every difference is claimed by the report and
 every claimed loss actually happened, with equal counts.
 """
 
+import datetime
+import re
 from collections import Counter, defaultdict
 from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 
@@ -59,6 +61,262 @@ def _bdt_to_gps(inp, target):
     return ("\n".join(out) + "\n").encode("latin-1")
 
 
+def _header_recs(lines):
+    out = []
+    for l in lines:
+        lab = l[60:80].strip()
+        if lab == "END OF HEADER":
+            break
+        out.append((lab, l[:60].ljust(60)))
+    return out
+
+
+def _align_rules(inl, outl, report, target):
+    """--align-phases, read from the report and checked against this checker's own reading of
+    the files (PLAN section 3.3 rules 2-4): (adjust for obs_tokens or None, 'applied' |
+    'removed' | None, problems).
+      - rule 2 (3.02-3.05 target): the systems the report's assumptions name (source
+        'user:--align-phases ...') must be of unknown alignment in the input (RINEX 2 or 3.00;
+        3.01 entries without values; 3.02+ no entry or the system alone), every such system
+        with phase types in the output must be named, the input may record no applied
+        correction (rule 4), and every output phase code of a named system must have a value in
+        the target's table (phase_shift_tables.json); each output phase value is then moved
+        back by that value;
+      - rule 3 (3.00 target, rule OBS.PHASE.UNALIGN-3.00): each output phase value of a code
+        and satellite an input header SYS / PHASE SHIFT entry gives a non-zero value for is
+        moved back up by it, the code's values stored under the output's own SYS / SCALE FACTOR
+        (a finer factor keeps a 5-decimal correction exact: _unalign_scale_check).
+    The rule is chosen by the report's table rule (OBS.PHASE.ALIGN-A19-3.02, -A23-3.03 to
+    -A23-3.05) or align assumptions for rule 2 and OBS.PHASE.UNALIGN-3.00 for rule 3, never by a
+    name's prefix: OBS.PHASE.ALIGN-CLIPPED comes with either (Astra verify round V2: a 3.00
+    conversion that clipped was checked as rule 2)."""
+    from .headers import align_systems, phase_entries, table_shift
+    p = []
+    sv = report["source_version"]
+    rules = report.get("rules") or {}
+    aligned = align_systems(report)
+    table_rule = [k for k in rules if re.fullmatch(r"OBS\.PHASE\.ALIGN-A(19-3\.02|23-3\.0[345])", k)]
+    lost = {k.split(":")[1] for k in report.get("losses", {}) if k.startswith(("system-not-representable:",
+                                                                               "system-removed-unresolvable:"))}
+    ent = phase_entries(_header_recs(inl)) if "3.01" <= sv < "4" else []
+    applied = [e for e in ent if e[1] and e[2] is not None and e[2] != 0]
+    out_phase = defaultdict(list)
+    cur = None
+    for lab, c in _header_recs(outl):
+        if lab == "SYS / # / OBS TYPES":
+            if c[:1].strip():
+                cur = c[0]
+            out_phase[cur] += [x for x in c[7:60].split() if x[:1] == "L"]
+
+    def unknown(s):
+        if sv < "3.01":
+            return True
+        if sv >= "4":
+            return False
+        mine = [e for e in ent if e[0] == s]
+        return all(e[2] is None for e in mine) if sv < "3.02" else all(not e[1] for e in mine)
+    if (aligned or table_rule) and "OBS.PHASE.UNALIGN-3.00" in rules:
+        p.append(f"the report gives both an alignment table rule {table_rule} and OBS.PHASE.UNALIGN-3.00")
+    if aligned or table_rule:
+        want = {"3.02": "OBS.PHASE.ALIGN-A19-3.02"}.get(target, f"OBS.PHASE.ALIGN-A23-{target}")
+        if table_rule != [want]:
+            p.append(f"--align-phases to RINEX {target}: the report's table rules are {table_rule}, "
+                     f"not [{want!r}]")
+        if not "3.02" <= target <= "3.05":
+            p.append(f"--align-phases shifts reported for a RINEX {target} target (3.02-3.05 have tables)")
+        if applied:
+            p.append(f"--align-phases on an input whose SYS / PHASE SHIFT records applied corrections "
+                     f"{[(e[0], e[1], str(e[2])) for e in applied][:3]} (PLAN 3.3 rule 4: never twice)")
+        for s in sorted(aligned):
+            if not unknown(s):
+                p.append(f"--align-phases shifted {s}, whose alignment the RINEX {sv} input records")
+            nogo = [c for c in out_phase.get(s, []) if table_shift(target, s, c) is None]
+            if nogo:
+                p.append(f"--align-phases for {s}: the RINEX {target} table gives no value for {nogo}")
+            # a RINEX 2 code names no tracking mode: an attribute from the converter's table or
+            # receiver rule (not the user's --overrides) may not decide a shift where the table's
+            # value differs between the attributes the code could stand for (review round 39)
+            for x in report.get("assumptions", []) or []:
+                if x.get("category") != f"obs-code-attribute:{s}" or x.get("source") == "override":
+                    continue
+                v2, _, v3 = (x.get("detail") or "").partition("->")
+                if v3 in out_phase.get(s, []):
+                    cands = [c for c in _codes.codes(target, s) if c[:2] == v3[:2]]
+                    if len({table_shift(target, s, c) for c in cands}) > 1:
+                        p.append(f"--align-phases for {s} {v2}: written {v3} by {x.get('source')}, but the "
+                                 f"table's shift differs among {cands}: a guessed shift")
+        for s, codes in out_phase.items():
+            if codes and s not in aligned and unknown(s):
+                p.append(f"--align-phases left {s} unshifted although its alignment is unknown in the input")
+        # the output code of an input phase code: a RINEX 2 code's from the report's attribute
+        # assumption, a RINEX 3 code itself (BeiDou B1I in the target's band: 1 in 3.02, else 2)
+        v2map = defaultdict(dict)
+        for x in report.get("assumptions", []) or []:
+            if (x.get("category") or "").startswith("obs-code-attribute:"):
+                v2, _, v3 = (x.get("detail") or "").partition("->")
+                v2map[x["category"].split(":", 1)[1]][v2] = v3
+
+        def adjust(s, code, sat, ep=None, value=None, fin=None, slip=False, scope=0):
+            if slip or s not in aligned or s in lost:
+                return None
+            if sv < "3":
+                tcode = v2map[s].get(code)
+                if tcode is None:
+                    return None
+            elif s == "C" and code[1:2] in "12" and code[2:3] in "IQX":
+                tcode = code[0] + ("1" if target == "3.02" else "2") + code[2]
+            else:
+                tcode = code
+            d = table_shift(target, s, tcode)
+            return (d, tcode, adjust.factor(ep, sat, tcode, False)) if d else None
+        adjust.factor = lambda ep, sat, c, slip: None
+        return adjust, "applied", p
+    if "OBS.PHASE.UNALIGN-3.00" in rules:
+        if target != "3.00":
+            p.append(f"recorded phase corrections removed for a RINEX {target} target (rule 3 is for 3.00)")
+        # every entry counts, zeros and codes alone (no correction) too, per satellite: one
+        # satellite given two different values is no correction the record states (review
+        # round 39: a zero entry for G12 was dropped before the other entry was applied)
+        recs = defaultdict(list)
+        for i, (s, code, v, sats) in enumerate(ent):
+            if code:
+                recs[(s, code)].append((v if v is not None else Decimal(0), set(sats), i))
+        clash = set()
+
+        def adjust(s, code, sat, ep=None, value=None, fin=None, slip=False, scope=0):
+            if s in lost or (s, code) not in recs:
+                return None
+            cover = [] if slip else [(v, i) for v, sats, i in recs[(s, code)] if not sats or sat in sats]
+            ds = {v for v, i in cover}
+            if len(ds) > 1:
+                if (s, code, sat) not in clash:
+                    clash.add((s, code, sat))
+                    p.append(f"{s} {code} {sat}: the input records two corrections {sorted(map(str, ds))}, "
+                             "yet one was removed")
+                return None
+            d = next(iter(ds)) if ds else Decimal(0)
+            fin = Decimal(fin or 1)
+            fout = adjust.factor(ep, sat, code, slip)
+            k = (fout or fin) / fin               # the output's factor over the input's
+            if value is not None and any(v for v, sats, i in recs[(s, code)]):
+                # what a finer factor must hold (_unalign_scale_check): every value of a
+                # corrected code in one scope of its factor (obs_tokens: the header, then each
+                # event naming the code or all its system's types), slips (flag 6) too, less the
+                # correction that applies to it
+                x = value - d * fin
+                if not adjust.frozen:
+                    st = adjust.stats.setdefault((s, code, scope), [fin, 0, x, x])
+                    st[1] = max(st[1], -x.normalize().as_tuple().exponent)
+                    st[2], st[3] = max(st[2], x), min(st[3], x)
+                seen = adjust.seen.setdefault((s, code, scope), [False, Decimal(1)])
+                seen[0] = seen[0] or x * k != (x * k).quantize(Decimal("0.001"))
+                seen[1] = max(seen[1], k)
+            if k != 1:
+                adjust.scaled += 1                # (OBS.PHASE.UNALIGN-SCALE counts these)
+            if slip:
+                return None
+            if d:
+                # (an entry is undone once it changes a value the output keeps: Astra round 39)
+                adjust.used.update(i for v, i in cover)
+            if not d and k == 1:
+                return None
+            return -d, code, fout
+
+        def restart():
+            """Before the input is read again (columns claimed lost left out): what the output
+            holds is counted again; the values a factor must hold stay those of every column,
+            as the converter chooses its factor from the whole input."""
+            adjust.used.clear()
+            adjust.seen.clear()
+            adjust.scaled = 0
+            adjust.frozen = True
+        adjust.used = set()
+        adjust.stats = {}
+        adjust.seen = {}
+        adjust.scaled = 0
+        adjust.frozen = False
+        adjust.restart = restart
+        adjust.factor = lambda ep, sat, c, slip: None
+        return adjust, "removed", p
+    return None, None, p
+
+
+def _align_counts(acodes, akind, report):
+    """The report's counts must be exactly the values this checker moved: phase-shift-applied /
+    phase-shift-removed per system, code and shift (the removed one is the recorded value),
+    phase-shift-clipped, and the losses phase-align-precision / phase-unalign-precision."""
+    p = []
+    norms = report.get("normalisations") or {}
+    want = Counter()
+    for k, n in norms.items():
+        if k.startswith(("phase-shift-applied:", "phase-shift-removed:")):
+            kind, s, code, d = k.split(":", 3)
+            want[(kind.rsplit("-", 1)[1], s, code, Decimal(d).normalize())] += n
+    got = Counter()
+    for (s, code, delta), n in getattr(acodes, "adjusted", Counter()).items():
+        got[(akind, s, code, (delta if akind == "applied" else -delta).normalize())] += n
+    if want != got:
+        p.append(f"phase values shifted {dict(got)}, report claims {dict(want)}")
+    wclip = Counter({tuple(k.split(":")[1:3]): n for k, n in norms.items() if k.startswith("phase-shift-clipped:")})
+    gclip = Counter(getattr(acodes, "adjust_clipped", Counter()))
+    if +wclip != +gclip:
+        p.append(f"shifted phases past F14.3 clipped by 1e9 {dict(gclip)}, report claims {dict(wclip)}")
+    prefix = {"applied": "phase-align-precision:", "removed": "phase-unalign-precision:"}.get(akind, "-")
+    losses = report.get("losses") or {}
+    wprec = Counter({tuple(k.split(":")[1:3]): e["count"] for k, e in losses.items() if k.startswith(prefix)})
+    other = [k for k in losses if k.startswith(("phase-align-precision:", "phase-unalign-precision:"))
+             and not k.startswith(prefix)]
+    if other:
+        p.append(f"report claims {other}, which this conversion's shifts cannot cause")
+    gprec = Counter(getattr(acodes, "adjust_rounded", Counter()))
+    if +wprec != +gprec:
+        p.append(f"shifted phases rounded to 3 decimals {dict(gprec)}, report claims {dict(wprec)}")
+    return p
+
+
+_FACTORS = (1, 10, 100, 1000)     # SYS / SCALE FACTOR values (rinex300.txt Table A1 p.28)
+_F14_3 = (Decimal("-999999999.999"), Decimal("9999999999.999"))
+
+
+def _unalign_scale_check(adjust, report):
+    """--align-phases to 3.00 (rule 3): a correction F8.5 has up to 5 decimals (rinex305.txt
+    Table A2 p.57), so a value less it may need more than F14.3's 3; 3.00 stores finer values
+    under SYS / SCALE FACTOR ('to increase resolution by 10, 100, etc', rinex300.txt section 5.5
+    p.12; 1, 10, 100 or 1000, Table A1 p.28). Per system, code and scope of its factor (the
+    header, then from each flag 2-5 event whose SYS / SCALE FACTOR names the code or all its
+    system's types, rinex305.txt section 6.5: this checker's own reading of the input; Astra
+    verify 2, W1: grouped by input factor, a scope where no factor works hid one where a factor
+    did), from every value of the code (all satellites; flags 0, 1 and 6) less the correction
+    that applies to it: where some k makes the input factor times k allowed, every such value
+    exact at 3 decimals once multiplied by k, and every one fitting F14.3, no output value may
+    have been rounded (a rounding a factor avoids is a loss, claimed or not: Astra verify round
+    V1) and the output factor must be the input's times the smallest such k; where none does,
+    the input's own. And OBS.PHASE.UNALIGN-SCALE counts the values (flags 0, 1, 6) written under
+    a factor other than the input's."""
+    p = []
+    for (s, code, scope), (fin, dec, hi, lo) in sorted(adjust.stats.items(), key=str):
+        best = next((k for k in _FACTORS if fin * k in _FACTORS and dec <= 2 + len(str(k))
+                     and _F14_3[0] <= lo * k and hi * k <= _F14_3[1]), None)
+        rounded, kmax = adjust.seen.get((s, code, scope), (False, Decimal(1)))
+        where = "the header" if not scope else f"the event at input line {scope}"
+        if best is None:
+            if kmax != 1:
+                p.append(f"{s} {code} ({where}): written under SYS / SCALE FACTOR {fin * kmax}, although "
+                         f"no allowed factor holds every value (the input's {fin} stays)")
+            continue
+        if rounded:
+            p.append(f"{s} {code} ({where}): values less their recorded correction rounded to 3 decimals, "
+                     f"although SYS / SCALE FACTOR {fin * best} would hold every one exactly (input factor {fin})")
+        if kmax > best:
+            p.append(f"{s} {code} ({where}): written under SYS / SCALE FACTOR {fin * kmax}, where "
+                     f"{fin * best} holds every value exactly (the smallest)")
+    n = ((report.get("rules") or {}).get("OBS.PHASE.UNALIGN-SCALE") or {}).get("count", 0)
+    if n != adjust.scaled:
+        p.append(f"{adjust.scaled} phase values written under a finer factor than the input's, "
+                 f"report claims {n} OBS.PHASE.UNALIGN-SCALE")
+    return p
+
+
 def compare_obs(inp, out, report, tin=None):
     problems = []
     target = report["target_version"]
@@ -77,8 +335,30 @@ def compare_obs(inp, out, report, tin=None):
     elif tin is None or exact:
         tin = obs_tokens(inl, exact=exact)
     rin, cin = tin
-    rout, cout = obs_tokens(lines_of(out), exact=exact)
+    adjust, akind, aprob = _align_rules(inl, lines_of(out), report, target)
+    acodes = None
+    if adjust is not None:
+        # --align-phases: the input's phase values moved by the shift the report's assumptions
+        # (or the input's own records, to 3.00) and this checker's own tables say, as the
+        # output must hold them, and phases compared by value
+        # (the output first: each value moved is stored under the output's own factor for it)
+        outfac = {}
+        rout, cout = obs_tokens(lines_of(out), exact=exact, norm=True, factors=outfac)
+        adjust.factor = lambda ep, sat, c, slip: outfac.get((ep, sat, c, slip))
+        tin = obs_tokens(inl, v3_lli=v3_lli, exact=exact, adjust=adjust)
+        rin, cin = tin
+        acodes = cin
+    else:
+        rout, cout = obs_tokens(lines_of(out), exact=exact)
     losses = report.get("losses", {})
+    # text in columns no field covers (only --lenient converts such an input): dropped, one
+    # claim per input line, and none in the output (round 32: cut at column 80 unreported)
+    c_skip = losses.get("data-text-dropped", {}).get("count", 0)
+    if getattr(cin, "skipped", 0) != c_skip:
+        problems.append(f"{getattr(cin, 'skipped', 0)} input data lines hold text no field covers, "
+                        f"report claims {c_skip} data-text-dropped")
+    if getattr(cout, "skipped", 0):
+        problems.append(f"{cout.skipped} output data lines hold text no field covers")
     lost_sys = {k.split(":")[1] for k in losses if k.startswith(("system-not-representable:",
                                                                  "system-removed-unresolvable:"))}
     lost_codes = {}
@@ -163,6 +443,26 @@ def compare_obs(inp, out, report, tin=None):
                 break
         else:
             choice = first
+    if target < "3" <= report["source_version"]:
+        # RINEX 3 -> 2: the column kept must be the best by the user-confirmed priority
+        # (docs/DECISIONS.md, confirmed 2026-11-01 answer 7; attribute_defaults.json), where
+        # that text orders the two attributes (verify round: the policy was not checked)
+        from .headers import ATTR_DEFAULTS
+
+        def rank(order, attr):
+            for r, run in enumerate(order.split("|")):
+                if attr in run:
+                    return r, run.index(attr)
+            return None
+        for (k, s, g), w in choice.items():
+            for c in g:
+                if c == w or len(c) != 3 or len(w) != 3 or c[1] != w[1]:
+                    continue
+                order = ATTR_DEFAULTS["collapse_priority"].get(s + w[1])
+                rw, rc = (rank(order, w[2]), rank(order, c[2])) if order else (None, None)
+                if rw is not None and rc is not None and rw > rc:
+                    problems.append(f"{s} {sig(s, w)}: the output keeps {w} over {c}, against the confirmed "
+                                    f"RINEX 3 -> 2 priority {order}")
     for (s, code), exp in lost_by(choice, drop).items():
         collapse_expect[(s, code)] = exp
     for (s, code), n in lost_codes.items():
@@ -175,7 +475,25 @@ def compare_obs(inp, out, report, tin=None):
     if drop:
         # the input without the columns claimed lost: what is left must be in the output as it
         # is, so a kept column holds its own signal's values (not those of the one dropped)
-        rin = obs_tokens(inl, v3_lli=v3_lli, exact=exact, drop=drop)[0]
+        if adjust is not None and akind == "removed":
+            adjust.restart()                  # (counted again without the dropped columns)
+        rin, dcodes = obs_tokens(inl, v3_lli=v3_lli, exact=exact, drop=drop, adjust=adjust)
+        if adjust is not None:
+            acodes = dcodes
+    if adjust is not None:
+        problems += aprob                 # (after the tokens: adjust adds what it finds)
+        problems += _align_counts(acodes, akind, report)
+        if akind == "removed":
+            problems += _unalign_scale_check(adjust, report)
+        elif "OBS.PHASE.UNALIGN-SCALE" in (report.get("rules") or {}):
+            problems.append("the report gives OBS.PHASE.UNALIGN-SCALE for a conversion that adds shifts")
+    elif any(k.startswith(("phase-shift-applied:", "phase-shift-removed:", "phase-shift-clipped:"))
+             for k in report.get("normalisations") or {}) or any(
+            k.startswith(("phase-align-precision:", "phase-unalign-precision:")) for k in losses) or any(
+            k.startswith(("OBS.PHASE.ALIGN-", "OBS.PHASE.UNALIGN-")) for k in report.get("rules") or {}):
+        problems.append("the report claims phase shifts, but no --align-phases rule or assumption")
+    else:
+        problems += aprob
     if target < "4.02":
         merged = {}
         for (ep, sat, flag), items in rin.items():
@@ -389,7 +707,8 @@ def compare_obs(inp, out, report, tin=None):
             has[key] = has_columns(k, sat[0])
         by_epoch[ek].append(sat[0] in lost_sys or not has[key])
     type_emptied = {(_norm_time(ek[0]), ek[1]) for ek, gone in by_epoch.items() if gone and all(gone)}
-    problems.extend(compare_obs_meta(inp, out, report, type_emptied=type_emptied))
+    problems.extend(compare_obs_meta(inp, out, report, type_emptied=type_emptied,
+                                     unalign_undone=len(adjust.used) if akind == "removed" else None))
     return problems
 
 
@@ -450,9 +769,183 @@ def _near(a, b):
     return abs(a - b) <= Decimal(5).scaleb(b.adjusted() - 4)
 
 
+# ---------------------------------------------------------------------------
+# value changes the specs define between navigation versions (review round 32), written here
+# from the spec text, independently of the converter
+# ---------------------------------------------------------------------------
+_DAY = Decimal(86400)
+_SUNDAY0 = datetime.date(1980, 1, 6)          # GPS (and the UTC weeks counted alike) start on Sunday
+
+
+def _floor_day(v):
+    """v modulo 86400 (also for a negative v): the seconds of day of a seconds-of-week value."""
+    return v - _DAY * (v / _DAY).to_integral_value(rounding=ROUND_FLOOR)
+
+
+def _dow(day):
+    return (day.weekday() + 1) % 7
+
+
+def _near_day(toc, sod):
+    """Day offset (0, -1, +1; ties to Toc's own day) that puts `sod` nearest the epoch toc."""
+    t = Decimal(toc[3] * 3600 + toc[4] * 60) + Decimal(toc[5])
+    best = None
+    for k in (0, -1, 1):
+        d = abs(sod + _DAY * k - t)
+        if best is None or d < best[0]:
+            best = (d, k)
+    return best[1]
+
+
+def glo_tk_week(toc, tk):
+    """(value, other week) of a RINEX 2 GLONASS tk, '0 .le. tk .lt. 86400 sec of day UTC'
+    (rinex211.txt Table A11 l.1718), in RINEX 3/4: '(tk+nd*86400) in seconds of the UTC week'
+    (rinex300.txt Table A9 l.2425; rinex305.txt Table A10 p.74; rinex_4.02.txt Table A15 p.87):
+    tk on the day nearest Toc, counted from the start of Toc's UTC week (the user's decision of
+    2026-11-02, 'Toc week', as the GEO tables say for SBAS: rinex211.txt l.910-915), so it may
+    be negative or 604800 and more; other week: the frame is not in Toc's week."""
+    day = datetime.date(*toc[:3])
+    nd = _dow(day) + _near_day(toc, tk)
+    return tk + _DAY * nd, not 0 <= nd < 7
+
+
+def sbas_week(toc, sod):
+    """A 2.10 GEO 'message frame time (sec of day GPS)' (rinex210.txt Table A16 l.1656) as the
+    2.11+ 'Transmission Time of Message ... GPS seconds of the week ... has to refer to the same
+    GPS week as the Epoch of Ephemerides ... adjusted by - or + 604800' (rinex211.txt l.910-915):
+    the instant nearest Toc, from the start of Toc's GPS week (may be < 0 or >= 604800)."""
+    day = datetime.date(*toc[:3])
+    return sod + _DAY * (_dow(day) + _near_day(toc, sod))
+
+
+def tk_day_basis(toc, tk):
+    """A RINEX 3/4 GLONASS tk clearly written as seconds of the day: below 86400, Toc not on a
+    Sunday (both bases agree there), more than 12 h from Toc's seconds of week and, as seconds
+    of day, within 12 h of Toc's (circular distances: a week-basis tk lies within about a
+    quarter of an hour of Toc)."""
+    if tk is None or not 0 <= tk < _DAY:
+        return False
+    day = datetime.date(*toc[:3])
+    if _dow(day) == 0:
+        return False
+    sod = Decimal(toc[3] * 3600 + toc[4] * 60) + Decimal(toc[5])
+
+    def circ(a, c, m):
+        d = abs(a - c) % m
+        return min(d, m - d)
+    return circ(tk, _DAY * _dow(day) + sod, 7 * _DAY) > _DAY / 2 and circ(tk, sod, _DAY) <= _DAY / 2
+
+
+# Fields per line a RINEX 4 record defines, line 0 first (its positions: 3, then 4 per line).
+# rinex_4.02.txt Table A9 p.79 (GPS LNAV orbit 7: t_tm, fit interval: 4X,2E19.12), A19 p.94
+# (QZSS LNAV), A10 p.81 / A20 p.96 (CNAV orbit 8: t_tm, wn_op), A11 p.83 / A21 p.98 (CNV2 orbit 8
+# ISC_L1Cd, ISC_L1Cp; orbit 9 t_tm, wn_op), A13 p.85 (Galileo orbit 5: IDOT, data sources, week;
+# orbit 7: t_tm), A15 p.87 (GLONASS FDMA), A23 p.100 (BDS D1/D2 orbit 7: t_tm, AODC), A24/A25
+# p.102/104 (CNV1/CNV2: spares inside lines are fields), A26 p.106 (CNV3 orbit 8: t_tm), A28
+# p.108 (SBAS), A30 p.111 (NavIC orbit 7: t_tm). 4.02 adds the optional integer flags as a
+# third field of the CNAV/CNV2 last line (4X,3E19.12; 4.00/4.01: 4X,2E19.12, rinex_4.01.txt
+# Table A10 l.4419). STO: line 0 here holds the three A18 identifiers (tokens.nav_tokens), line
+# 1 four values (Table A33 p.115); EOP 3/4/4 (A34 p.116); ION Klobuchar line 2: Beta3 and the
+# Region code in 4.00/4.01 (rinex_4.00.txt Table A32 p.104), Beta3 only in 4.02 (A35 p.117);
+# NeQuick-G line 1: the flags (A36 p.118); BDGIM line 2: two (A37 p.119).
+_EPH_FIELDS4 = {
+    ("G", "LNAV"): (3, 4, 4, 4, 4, 4, 4, 2), ("J", "LNAV"): (3, 4, 4, 4, 4, 4, 4, 2),
+    ("G", "CNAV"): (3, 4, 4, 4, 4, 4, 4, 4, 2), ("J", "CNAV"): (3, 4, 4, 4, 4, 4, 4, 4, 2),
+    ("G", "CNV2"): (3, 4, 4, 4, 4, 4, 4, 4, 2, 2), ("J", "CNV2"): (3, 4, 4, 4, 4, 4, 4, 4, 2, 2),
+    ("E", "INAV"): (3, 4, 4, 4, 4, 3, 4, 1), ("E", "FNAV"): (3, 4, 4, 4, 4, 3, 4, 1),
+    ("R", "FDMA"): (3, 4, 4, 4, 4),
+    ("C", "D1"): (3, 4, 4, 4, 4, 4, 4, 2), ("C", "D2"): (3, 4, 4, 4, 4, 4, 4, 2),
+    ("C", "CNV1"): (3, 4, 4, 4, 4, 4, 4, 4, 4, 4), ("C", "CNV2"): (3, 4, 4, 4, 4, 4, 4, 4, 4, 4),
+    ("C", "CNV3"): (3, 4, 4, 4, 4, 4, 4, 4, 1),
+    ("S", "SBAS"): (3, 4, 4, 4), ("I", "LNAV"): (3, 4, 4, 4, 4, 4, 4, 1),
+}
+_FLAGS402 = {("G", "CNAV"), ("J", "CNAV"), ("G", "CNV2"), ("J", "CNV2")}
+_KLOB = {("G", "LNAV"), ("J", "LNAV"), ("I", "LNAV"), ("C", "D1D2"), ("G", "CNVX"), ("J", "CNVX")}
+
+
+def fields4(version, kind, s, msg):
+    if version < "4":
+        return None
+    if kind == "EPH":
+        f = _EPH_FIELDS4.get((s, msg))
+        if f is not None and version >= "4.02" and (s, msg) in _FLAGS402:
+            f = f[:-1] + (3,)
+        return f
+    if kind == "STO":
+        return (3, 4)
+    if kind == "EOP":
+        return (3, 4, 4)
+    if kind == "ION":
+        if (s, msg) in _KLOB:
+            return (3, 4, 1 if version >= "4.02" else 2)
+        return {("E", "IFNV"): (3, 1), ("C", "CNVX"): (3, 4, 2)}.get((s, msg))
+    return None
+
+
+# Spare fields inside RINEX 4 lines, as value positions (BROADCAST ORBIT k starts at 3 + 4 (k-1)):
+# rinex_4.02.txt Tables A16/A17 p.90-91 (GLONASS L1OC/L3OC orbit 8 field 3), A23 p.100 (BDS D1/D2
+# orbit 5 fields 2, 4), A24 p.102 (CNV1 orbit 7 field 2, orbit 9 fields 2, 3), A25 p.104 (CNV2
+# orbit 7 field 1, orbit 9 fields 2, 3), A30 p.110-111 (NavIC LNAV orbit 5 fields 2, 4, orbit 6
+# field 4), A31 p.112 (L1NV orbit 5 field 3), A34 p.116 (EOP line 1 field 1); rinex_4.00.txt the
+# same for the types it has (l.5035-5037, 5172, 5187, 5287, 5307, 5686-5690, 5725, 5847)
+_SPARES4 = {
+    ("EPH", "R", "L1OC"): (3 + 28 + 2,), ("EPH", "R", "L3OC"): (3 + 28 + 2,),
+    ("EPH", "C", "D1"): (3 + 16 + 1, 3 + 16 + 3), ("EPH", "C", "D2"): (3 + 16 + 1, 3 + 16 + 3),
+    ("EPH", "C", "CNV1"): (3 + 24 + 1, 3 + 32 + 1, 3 + 32 + 2),
+    ("EPH", "C", "CNV2"): (3 + 24 + 0, 3 + 32 + 1, 3 + 32 + 2),
+    ("EPH", "I", "LNAV"): (3 + 16 + 1, 3 + 16 + 3, 3 + 20 + 3), ("EPH", "I", "L1NV"): (3 + 16 + 2,),
+    ("EOP", None, None): (3,),
+}
+
+
+def spares4(version, kind, s, msg):
+    if version < "4":
+        return ()
+    return _SPARES4.get(("EOP", None, None) if kind == "EOP" else (kind, s, msg), ())
+
+
+# Spare fields of RINEX 2/3 EPH records as value positions, by system (line k's fields at
+# 3 + 4 (k-1) ..): GPS orbit 7 fields 3-4 (rinex211.txt Table A4 l.1411-1412, rinex305.txt Table
+# A6 p.69); Galileo orbit 5 field 4 and orbit 7 fields 2-4 (rinex305.txt Table A8 p.71-72); QZSS
+# orbit 7 fields 3-4, and in 3.02 orbit 5 field 4 (rinex302.txt Table A12 p.71-72; the L2 P
+# flag from 3.03, rinex303.txt p.80); BDS orbit 5 fields 2, 4 and orbit 7 fields 3-4
+# (rinex305.txt Table A14 p.79-80); NavIC orbit 5 fields 2, 4, orbit 6 field 4, orbit 7 fields
+# 2-4 (rinex305.txt Table A18 p.83-84); GEO 2.10 orbit 3 field 4 (rinex210.txt Table A16
+# l.1671; the IODN from 2.11, rinex211.txt l.1976); GLONASS none.
+def spares23(version, s):
+    if version >= "4":
+        return ()
+    if s == "S":
+        return (3 + 8 + 3,) if version < "2.11" else ()
+    o5, o6, o7 = 3 + 16, 3 + 20, 3 + 24
+    return {"G": (o7 + 2, o7 + 3), "E": (o5 + 3, o7 + 1, o7 + 2, o7 + 3),
+            "J": ((o5 + 3,) if version < "3.03" else ()) + (o7 + 2, o7 + 3),
+            "C": (o5 + 1, o5 + 3, o7 + 2, o7 + 3),
+            "I": (o5 + 1, o5 + 3, o6 + 3, o7 + 1, o7 + 2, o7 + 3)}.get(s, ())
+
+
+# the field a position holds where it is no spare, as the claims name it
+_REAL_NAME = {("S", 3 + 8 + 3): "IODN", ("J", 3 + 16 + 3): "L2P-flag"}
+_LEGACY_MSG = {"G": "LNAV", "J": "LNAV", "I": "LNAV", "S": "SBAS", "R": "FDMA", "C": "D1", "E": "INAV"}
+
+
+def _flags_at(s, msg):
+    """Position of the 4.02 CNAV/CNV2 integer flags: the third field of the last line."""
+    f = _EPH_FIELDS4[(s, msg)]
+    return 3 + 4 * (len(f) - 2) + 2
+
+
+# the loss categories this file counts (each compared with the report as a whole)
+_COUNTED = ("nav-field-not-representable:", "nav-spare-value-dropped:", "nav-sto-system-not-representable:")
+# the one UTC ID of these 'UT' offsets: rinex_4.02.txt Table 27 p.43 (4.00/4.01 Table 23 p.40/42)
+_TABLE27 = {"GPUT": "UTC(USNO)", "GLUT": "UTC(SU)", "GAUT": "UTCGAL", "BDUT": "UTC(NTSC)", "QZUT": "UTC(NICT)"}
+
+
 def compare_nav(inp, outs, report, rin=None, merged=None):
     """Positional comparison of every EPH record (rinex211.txt A4/A11/A16 and rinex305.txt
-    A6-A14 bodies line up position by position; RINEX 4 EPH bodies are RINEX 3 bodies).
+    A6-A14 bodies line up position by position; RINEX 4 EPH bodies are RINEX 3 bodies), with
+    the value changes the specs define (GLONASS tk and 2.10 GEO frame time bases, the 2.00
+    GLONASS signs, the fields each RINEX 4 line defines, the QZSS ionospheric area).
     outs: list of output payloads (RINEX 2 targets may split one file into several);
     merged: the other inputs of a --merge (their records are the input too)."""
     problems = []
@@ -461,27 +954,37 @@ def compare_nav(inp, outs, report, rin=None, merged=None):
         # the other inputs' records went unchecked)
         return ["a --merge conversion (rule NAV.MERGE): pass the other inputs (merged=[...])"]
     rin = rin if rin is not None else nav_tokens(lines_of(inp))
-    per_input = [("%.2f" % float(report["source_version"]), rin)]     # (version, tokens) of each input
+    source = report["source_version"]
+    svk = "%.2f" % float(source)
+    per_input = [(svk, rin)]     # (version, tokens) of each input
+    rver = {k: [svk] * len(v) for k, v in rin.items()}     # each record's input version
+    payloads = [(svk, inp)]
     if merged:
         rin = {k: list(v) for k, v in rin.items()}
         for m in merged:
             mt = nav_tokens(lines_of(m))
-            per_input.append(("%.2f" % float(lines_of(m)[0][:9]), mt))
+            mv = "%.2f" % float(lines_of(m)[0][:9])
+            per_input.append((mv, mt))
+            payloads.append((mv, m))
             for k, v in mt.items():
                 rin.setdefault(k, []).extend(v)
+                rver.setdefault(k, []).extend([mv] * len(v))
     rout = {}
     for o in outs:
         for k, v in nav_tokens(lines_of(o)).items():
             rout.setdefault(k, []).extend(v)
     target = report["target_version"]
-    source = report["source_version"]
     losses = report.get("losses", {})
+    rules = report.get("rules") or {}
+    assumptions = report.get("assumptions", []) or []
     lost_sys = {k.split(":")[1] for k in losses if k.startswith("system-not-representable:")}
     lost_msgs = {tuple(k.split(":")[1:3]) for k in losses if k.startswith("nav-message-not-representable:")}
-    line5_drop = "glonass-nav-line5-dropped" in losses
-    line5_fill = any(a["category"] == "glonass-nav-line5" for a in report.get("assumptions", []))
+    line5_fill = any(a["category"] == "glonass-nav-line5" for a in assumptions)
     dedupe = "nav-duplicate-removed" in losses
+    tk_fix = any(r.get("rule") == "NAV.GLO.TK-DAY-BASIS" for r in report.get("repairs", []) or [])
     dropped = Counter()
+    claims = Counter()            # loss categories the files show (the _COUNTED ones)
+    counts = Counter()            # rules and assumptions the files show
     unknown5 = [Decimal("999999999.999").normalize(), Decimal(15)]
     # RINEX 3/4 nav epochs have whole seconds (I2.2: rinex305.txt Table A6, rinex_4.02.txt
     # Table A8); a RINEX 2 epoch's tenths (F5.1, rinex211.txt Table A4) are floored, one
@@ -489,23 +992,103 @@ def compare_nav(inp, outs, report, rin=None, merged=None):
     if target >= "3":
         n_frac = 0
         keyed = {}
+        kver = {}
         for key, recs in rin.items():
             t = key[2] if key[0] == "EPH" and len(key) > 2 else None
             if t is not None and t[5] != t[5].to_integral_value():
                 n_frac += sum(1 for m, v in recs if key[1][0] not in lost_sys
                               and (key[1][0], m.split(" ")[0]) not in lost_msgs)
-                key = key[:2] + (t[:5] + (t[5].to_integral_value(rounding=ROUND_FLOOR),),) + key[3:]
-            keyed.setdefault(key, []).extend(recs)
-        rin = keyed
+                key2 = key[:2] + (t[:5] + (t[5].to_integral_value(rounding=ROUND_FLOOR),),) + key[3:]
+            else:
+                key2 = key
+            keyed.setdefault(key2, []).extend(recs)
+            kver.setdefault(key2, []).extend(rver[key])
+        rin, rver = keyed, kver
         c = losses.get("nav-epoch-precision", {}).get("count", 0)
         if c != n_frac:
             problems.append(f"{n_frac} nav records with a fractional epoch second, report claims {c} "
                             "nav-epoch-precision")
 
-    def expected(key, recs):
+    def cut(vals, version, vin, kind, s, msg, src_msg):
+        """vals as a RINEX `version` line holds them: without the positions its lines do not
+        define (fields4) and with its spare fields blank (spares4: 'Spare fields are to be left
+        blank', rinex_4.02.txt section 6.4 p.48). What goes is counted as the claim it needs: the
+        4.02 CNAV/CNV2 flags, a defined field, whenever written; any other value (a spare, or a
+        field no version defines: spares 'hold no defined content', rinex305.txt section 6.4
+        p.42) when not zero."""
+        fields = fields4(version, kind, s, msg)
+        gone = set(spares4(version, kind, s, msg))
+        if fields is not None:
+            pos = 0
+            for line, n in enumerate(fields):
+                width = 3 if line == 0 else 4
+                gone.update(range(pos + n, pos + width))
+                pos += width
+        if not gone:
+            return vals
+        flags = _flags_at(s, src_msg) if kind == "EPH" and vin >= "4.02" and (s, src_msg) in _FLAGS402 else None
+        out = list(vals)
+        for k in sorted(gone):
+            if k < len(out) and out[k] is not None:
+                if k == flags:
+                    claims[f"nav-field-not-representable:{s}:{src_msg}:flags"] += 1
+                elif out[k] != 0:
+                    claims[f"nav-spare-value-dropped:{kind}:{s}"] += 1
+                out[k] = None
+        return out
+
+    def eph_values(sat, toc, vals, vin, src_msg, want_msg):
+        s = sat[0]
+        if s == "R" and vin == "2.00":
+            # 2.00 GLONASS files store -TauN, -GammaN, +TauC; from 2.01 -TauN, +GammaN, -TauC
+            # (rinex210.txt l.171-180, section 8.2)
+            if len(vals) > 1 and vals[1] is not None:
+                vals[1] = -vals[1]
+            counts["v200"] += 1
+        if len(vals) > 2 and vals[2] is not None:
+            if s == "R" and src_msg in ("", "FDMA"):
+                if vin < "3" <= target:
+                    vals[2], other = glo_tk_week(toc, vals[2])
+                    counts["glo-tk"] += 1
+                    counts["glo-week"] += other
+                elif target < "3" <= vin:
+                    vals[2] = _floor_day(vals[2])
+                    counts["glo-tk"] += 1
+                elif vin >= "3" and target >= "3" and tk_day_basis(toc, vals[2]):
+                    counts["tk-day"] += 1
+                    if tk_fix:
+                        vals[2], other = glo_tk_week(toc, vals[2])
+                        counts["glo-week"] += other
+            elif s == "S" and (vin < "2.11") != (target < "2.11"):
+                vals[2] = sbas_week(toc, vals[2]) if vin < "2.11" else _floor_day(vals[2])
+                counts["sbas"] += 1
+        if vin >= "4":
+            vals = cut(vals, vin, vin, "EPH", s, src_msg, src_msg)
+        if target >= "4":
+            vals = cut(vals, target, vin, "EPH", s, want_msg, src_msg)
+        # RINEX 2/3 spares: a source spare holds no defined content, so it fills no target field
+        # (left blank, the 'unknown'), and no value goes into a target spare (rinex305.txt
+        # section 6.4 p.42 and revision note p.11 'shall be left blank and skipped when
+        # reading/writing'); a real source field with a target spare in its place (the 2.11+
+        # IODN to 2.10, the 3.03+ QZSS L2 P flag to 3.02) is a field lost whenever written
+        src_sp, tgt_sp = set(spares23(vin, s)), set(spares23(target, s))
+        for k in sorted(src_sp | tgt_sp):
+            if k < len(vals) and vals[k] is not None:
+                if k in src_sp and k in tgt_sp and vals[k] == 0:
+                    continue          # a zero spare to a RINEX 2/3 spare: zero and blank say nothing
+                if k in src_sp:
+                    if vals[k] != 0:
+                        claims[f"nav-spare-value-dropped:EPH:{s}"] += 1
+                else:
+                    claims[f"nav-field-not-representable:{s}:{src_msg or _LEGACY_MSG.get(s, '')}:"
+                           f"{_REAL_NAME.get((s, k), f'position-{k}')}"] += 1
+                vals[k] = None
+        return vals
+
+    def expected(key, recs, vers):
         out = []
         sat = key[1]
-        for msg, vals in recs:
+        for (msg, vals), vin in zip(recs, vers):
             # the message type: kept between RINEX 4 versions, derived going up (v4_message),
             # absent below RINEX 4
             if target < "4":
@@ -531,6 +1114,8 @@ def compare_nav(inp, outs, report, rin=None, merged=None):
                 vals = vals[:15]          # RINEX 3.04 and older have no GLONASS line 5
             elif sat[0] == "R" and line5_fill and len(vals) <= 15:
                 vals = vals + [None] * (15 - len(vals)) + GLO_LINE5_UNKNOWN
+            vals = eph_values(sat, key[2], vals, vin, msg.split(" ")[0] if msg else "",
+                              (want_msg or "").split(" ")[0])
             while vals and vals[-1] is None:
                 vals.pop()
             out.append((want_msg, tuple(vals)))
@@ -548,7 +1133,7 @@ def compare_nav(inp, outs, report, rin=None, merged=None):
         return False
 
     for key in set(k for k in rin if k[0] == "EPH") | set(k for k in rout if k[0] == "EPH"):
-        want = expected(key, rin.get(key, []))
+        want = expected(key, rin.get(key, []), rver.get(key, []))
         got = Counter((m if target >= "4" else None, tuple(v)) for m, v in rout.get(key, []))
         if want == got or deduped(want, got):
             continue
@@ -558,13 +1143,64 @@ def compare_nav(inp, outs, report, rin=None, merged=None):
         if len(problems) > 20:
             break
     subs_dropped = Counter()
-    # --qzss-ion-area: the user names the area the 4.02 CNVX records need; one area per file
-    told = {a["detail"]: a["count"] for a in report.get("assumptions", []) or []
-            if a["category"] == "qzss-ion-area" and a.get("source") == "user"}
-    area = next(iter(told)) if len(told) == 1 and set(told) <= {"WIDE", "JAPN"} else None
-    if told and not area:
-        problems.append(f"qzss-ion-area assumptions {told}: one area, WIDE or JAPN, expected")
-    n_given = 0
+    # --qzss-ion-area: the area of QZSS Klobuchar sets whose source names none, written as the
+    # 4.00/4.01 Region code; without it the code is blank, which those versions read as wide
+    # area (rinex_4.00.txt Table A32 p.104): either is an assumption, counted here and in
+    # compare_nav_meta (sets from RINEX 2/3 header records)
+    told = {}
+    for a in assumptions:
+        if a["category"] == "qzss-ion-area":
+            told[(a.get("source"), a["detail"])] = a["count"]
+    user = [d for (src, d) in told if src == "user"]
+    area = user[0] if len(user) == 1 and user[0] in ("WIDE", "JAPN") else None
+    if len(user) > 1 or (user and not area):
+        problems.append(f"qzss-ion-area assumptions {told}: one user area, WIDE or JAPN, expected")
+    area_counts = Counter()       # (source, area) of the sets written without the source's area
+
+    def ion_area(s, vin, m0, sub, v):
+        """(message, values) of a Klobuchar ION record in the target, None if it must go:
+        4.00/4.01 'Region code: 0 or blank (wide area parameters), 1 (QZSS only - Japan area
+        coefficients)' (rinex_4.00.txt Table A32 p.104; rinex_4.01.txt l.6190 p.108); 4.02 the
+        subtype WIDE/JAPN, which 'the QZSS ION CNVX message type must have ... for the other
+        types the subtype shall be left blank' (rinex_4.02.txt Table 25 p.40, Table A35 note 3*
+        p.117)."""
+        v = list(v) + [None] * (9 - len(v))
+        code_src = "4.00" <= vin < "4.02"
+        if code_src:
+            said = "WIDE" if v[8] in (None, 0) else ("JAPN" if v[8] == 1 else None)
+        else:
+            said = sub if sub in ("WIDE", "JAPN") else ""
+        if "4.00" <= target < "4.02":
+            if code_src:
+                if sub:                         # a subtype 4.00/4.01 do not define
+                    subs_dropped[f"nav-subtype-not-representable:ION:{s}:{m0}"] += 1
+                return m0, v
+            if sub and (s != "J" or not said):
+                subs_dropped[f"nav-subtype-not-representable:ION:{s}:{m0}"] += 1
+            if s != "J":
+                v[8] = None
+            elif said:
+                v[8] = Decimal(0 if said == "WIDE" else 1)
+            elif area:
+                v[8] = Decimal(0 if area == "WIDE" else 1)
+                area_counts[("user", area)] += 1
+            else:
+                v[8] = None
+                area_counts[("spec-default:blank-region-code", "WIDE")] += 1
+            return m0, v
+        if not code_src:
+            return (f"{m0} {sub}" if sub else m0), v
+        v[8] = None
+        if s == "J" and m0 == "CNVX":
+            return (f"CNVX {said}", v) if said else None
+        if s == "J" and said:
+            # the area as the LNAV subtype too: the user's decision of 2026-11-02, DLR's
+            # practice (BRD400DLR), not rinex_4.02.txt Table A35 note 3* (CNVX only)
+            return f"{m0} {said}", v
+        if s == "J" or said != "WIDE":
+            claims[f"nav-ion-area-not-representable:{s}:{m0}"] += 1
+        return m0, v
+
     # RINEX 4 STO/ION/EOP records of the RINEX 4 inputs, each judged by its own input's version
     # (Sol round 19: a merge with a RINEX 3 input skipped them, so a changed EOP value passed).
     # With every input RINEX 4 the output holds exactly these; a merge with a RINEX 2/3 input
@@ -579,30 +1215,47 @@ def compare_nav(inp, outs, report, rin=None, merged=None):
             for key, recs in toks.items():
                 if key[0] == "EPH":
                     continue
+                s = key[1][0]
                 for m, v in recs:
                     m0, _, sub = m.partition(" ")
-                    if (key[1][0], m0) in lost_msgs:
+                    if (s, m0) in lost_msgs:
                         dropped["message"] += 1
-                    elif key[0] == "ION" and key[1][0] == "J" and m == "CNVX" and vin < "4.02" <= target:
-                        if area:                      # the user's area, kept with the values
-                            n_given += 1
-                            exp[key][(f"CNVX {area}", tuple(v))] += 1
-                        else:
-                            dropped["cnvx-area"] += 1     # needs WIDE/JAPN from 4.02 (rinex_4.02.txt Table 25)
+                        continue
+                    if key[0] == "STO" and s == "S" and target < "4.02" and vin != target:
+                        # STO systems G,R,E,C,J,I in 4.00/4.01 (rinex_4.00.txt Table A30 p.102)
+                        claims[f"nav-sto-system-not-representable:S:{(v[0] if v else None) or '?'}"] += 1
+                        continue
+                    v = cut(list(v), vin, vin, key[0], s, m0, m0)
+                    if key[0] == "STO" and v and v[0] in _TABLE27 and len(v) > 2 and v[2] is None:
+                        # a 'UT' offset's UTC ID, 'necessary ... for every "UT" time offset
+                        # message': the one Table 27 names (rinex_4.02.txt p.43)
+                        v[2] = _TABLE27[v[0]]
+                        counts["utc-id"] += 1
+                    if key[0] == "ION" and (s, m0) in _KLOB:
+                        r = ion_area(s, vin, m0, sub, v)
+                        if r is None:
+                            dropped["cnvx-area"] += 1     # a code that names no area
+                            continue
+                        m2, v = r
                     elif sub and target < "4.02":
                         # subtypes exist from 4.02 (rinex_4.02.txt Table 25 p.40): the record
                         # stays, its subtype goes, claimed nav-subtype-not-representable
-                        subs_dropped[f"nav-subtype-not-representable:{key[0]}:{key[1][0]}:{m0}"] += 1
-                        exp[key][(m0, tuple(v))] += 1
+                        subs_dropped[f"nav-subtype-not-representable:{key[0]}:{s}:{m0}"] += 1
+                        m2 = m0
                     else:
-                        exp[key][(m, tuple(v))] += 1
+                        m2 = m
+                    v = cut(v, target, vin, key[0], s, m2.partition(" ")[0], m0)
+                    while v and v[-1] is None:
+                        v.pop()
+                    exp[key][(m2, tuple(v))] += 1
         keys = set(exp) | (set() if mixed else {k for k in rout if k[0] != "EPH"})
         for key in keys:
             a = exp.get(key, Counter())
             b = Counter((m, tuple(v)) for m, v in rout.get(key, []))
             if not mixed:
                 if a != b and not deduped(a, b):
-                    problems.append(f"nav {key[0]} record {key}: values differ")
+                    problems.append(f"nav {key[0]} record {key}: values differ (expected "
+                                    f"{next(iter(a - b), None)}, got {next(iter(b - a), None)})")
                 continue
             missing = a - b
             if missing and dedupe and all(b[k] >= 1 for k in missing):
@@ -623,96 +1276,162 @@ def compare_nav(inp, outs, report, rin=None, merged=None):
     if dropped["message"] != n_msg:
         problems.append(f"{dropped['message']} records of dropped message types, report claims {n_msg}")
     sub_claims = {k for k in losses if k.startswith("nav-subtype-not-representable:")}
+    area_claims = {k for k in losses if k.startswith("nav-ion-area-not-representable:")}
     if target >= "4":
         for cat in set(subs_dropped) | sub_claims:
             if subs_dropped[cat] != losses.get(cat, {}).get("count", 0):
                 problems.append(f"{subs_dropped[cat]} records lost their subtype, report claims "
                                 f"{losses.get(cat, {}).get('count', 0)} {cat}")
-    elif source >= "4.02":
-        # RINEX 2/3 header corrections have no subtype. The header keeps one set per model and
-        # system (the others are claimed nav-correction-extra), so a system's subtype claims
-        # add up to at most its kept sets (one per 'A' line: GPSA, QZSA, BDSA, IRNA, or GAL),
-        # each at most its subtyped input records; when every ION record of a system has a
-        # subtype and the header keeps a set of it, that set's subtype is claimed.
-        n_sub = Counter(f"nav-subtype-not-representable:{k[0]}:{k[1][0]}:{m.split(' ')[0]}"
-                        for k, lst in rin.items() if k[0] != "EPH" for m, v in lst if " " in m)
-        ion_all = Counter(k[1][0] for k, lst in rin.items() if k[0] == "ION" for m, v in lst)
-        ion_sub = Counter(k[1][0] for k, lst in rin.items() if k[0] == "ION" for m, v in lst if " " in m)
-        prefix = {"G": "GPS", "J": "QZS", "C": "BDS", "I": "IRN", "E": "GAL"}
-        head = [l for o in outs for l in lines_of(o) if l[60:80].strip() == "IONOSPHERIC CORR"]
-        kept = Counter(l[:3] for l in head if l[3:4] in "A ")
-        for cat in set(n_sub) | sub_claims:
-            c = losses.get(cat, {}).get("count", 0)
-            if c > n_sub[cat]:
-                problems.append(f"{n_sub[cat]} subtyped input records, report claims {c} {cat}")
-        exact = set()
-        if target >= "3.02":
-            # from 3.02 a Klobuchar set keeps its own place (type, time mark, SV: rinex305.txt
-            # Table A5), so the claims are exact: each kept QZSA/QZSB (GPSA, BDSA, IRNA) pair
-            # comes from the first input record, in file order, of its place with its values,
-            # and that record's subtype is lost (Sonnet round 28: a deleted claim passed on
-            # BRD400DLR, now that several QZSS sets are kept)
-            order = [(k, m, v) for k, lst in rin.items() if k[0] == "ION" for m, v in lst]
-            for s, p in prefix.items():
-                if s == "E":
-                    continue                      # NeQuick (GAL): one line, bounded below
-                exact.add(s)
-                want = Counter()
-                lines_ab = [l for l in head if l[:3] == p and l[3:4] in "AB"]
-                for la in (l for l in lines_ab if l[3:4] == "A"):
-                    place = (la[54:55].strip(), la[56:58].strip().lstrip("0"))
-                    lb = next((l for l in lines_ab if l[3:4] == "B" and
-                               (l[54:55].strip(), l[56:58].strip().lstrip("0")) == place), None)
-                    vals = [_dec(la[5 + 12 * j:17 + 12 * j]) for j in range(4)] + (
-                        [_dec(lb[5 + 12 * j:17 + 12 * j]) for j in range(4)] if lb else [None] * 4)
-                    for k, m, v in order:
-                        mark = chr(ord("A") + k[2][3]) if k[2] else ""
-                        if k[1][0] != s or (mark, k[1][1:].lstrip("0")) != place:
-                            continue
-                        if all(_near(a, b) for a, b in zip((list(v) + [None] * 8)[:8], vals) if b is not None):
-                            if " " in m:
-                                want[f"nav-subtype-not-representable:ION:{s}:{m.split(' ')[0]}"] += 1
-                            break
-                got = Counter({cat: losses[cat]["count"] for cat in sub_claims
-                               if cat.split(":")[1:3] == ["ION", s]})
-                if +want != +got:
-                    problems.append(f"{s}: kept ION sets from subtyped records {dict(want)}, report claims "
-                                    f"{dict(got)} nav-subtype-not-representable")
-        for s, p in prefix.items():
-            if s in exact:
-                continue
-            c = sum(losses.get(cat, {}).get("count", 0) for cat in sub_claims
-                    if cat.split(":")[1:3] == ["ION", s])
-            if c > kept[p]:
-                problems.append(f"{s}: {kept[p]} ION set(s) kept, report claims {c} "
-                                f"nav-subtype-not-representable:ION:{s}:*")
-                continue
-            if not kept[p] or not ion_all[s]:
-                continue
-            # which input records the kept set came from: Klobuchar alpha (xxxA) and beta
-            # (xxxB) lines, A4,1X,4D12.4 (rinex305.txt Table A5), against each record's 8
-            # values at that precision; NeQuick (GAL) cannot be matched, all-or-none applies
-            alpha = next((l for l in head if l[:4] == p + "A"), None)
-            beta = next((l for l in head if l[:4] == p + "B"), None)
-            if alpha is None or beta is None:
-                matched = [m for k, lst in rin.items() if k[0] == "ION" and k[1][0] == s for m, v in lst]
-            else:
-                want = [_dec(alpha[5 + 12 * j:17 + 12 * j]) for j in range(4)] + \
-                       [_dec(beta[5 + 12 * j:17 + 12 * j]) for j in range(4)]
-                matched = [m for k, lst in rin.items() if k[0] == "ION" and k[1][0] == s for m, v in lst
-                           if all(_near(a, b) for a, b in zip((list(v) + [None] * 8)[:8], want))]
-            if matched and all(" " in m for m in matched) and not c:
-                problems.append(f"{s}: the kept ION set comes from subtyped record(s) ({sorted(set(matched))[:2]}), "
-                                f"report claims no nav-subtype-not-representable:ION:{s}:*")
-            if matched and not any(" " in m for m in matched) and c:
-                problems.append(f"{s}: the kept ION set comes from records without a subtype, report "
-                                f"claims {c} nav-subtype-not-representable:ION:{s}:*")
+        for cat in set(k for k in claims if k.startswith("nav-ion-area-not-representable:")) | area_claims:
+            if claims[cat] != losses.get(cat, {}).get("count", 0):
+                problems.append(f"{claims[cat]} ionospheric sets lose their area, report claims "
+                                f"{losses.get(cat, {}).get('count', 0)} {cat}")
+    elif any(v >= "4" for v, t in per_input):
+        problems += _header_area_claims(rin, rver, outs, losses, target, sub_claims | area_claims)
     n_area = losses.get("nav-correction-not-representable:ION:CNVX-area-unknown:J", {}).get("count", 0)
     if dropped["cnvx-area"] != n_area:
-        problems.append(f"{dropped['cnvx-area']} QZSS CNVX ION records without an area, report claims {n_area}")
-    if area and told[area] != n_given:
-        problems.append(f"{n_given} QZSS CNVX ION records given the area {area}, report assumes {told[area]}")
-    problems.extend(compare_nav_meta(inp, outs, report, merged=merged))
+        problems.append(f"{dropped['cnvx-area']} QZSS CNVX ION records whose Region code names no area, "
+                        f"report claims {n_area}")
+    # fields the target's lines do not define (cut above), and SBAS STO records 4.00/4.01 lack
+    got_claims = Counter({k: e["count"] for k, e in losses.items() if k.startswith(_COUNTED)})
+    meta_counts = {}
+    problems.extend(compare_nav_meta(inp, outs, report, merged=merged, counts=meta_counts))
+    claims.update(meta_counts.get("claims", Counter()))
+    want_claims = Counter({k: n for k, n in claims.items() if k.startswith(_COUNTED)})
+    if +want_claims != +got_claims:
+        problems.append(f"values with no field in RINEX {target} {dict(+want_claims)}, report claims "
+                        f"{dict(+got_claims)}")
+    area_counts.update(meta_counts.get("qzss-ion-area", Counter()))
+    if +area_counts != +Counter(told):
+        problems.append(f"QZSS ionospheric sets written without their source's area {dict(+area_counts)}, "
+                        f"report assumes {told} (qzss-ion-area)")
+    # rules and assumptions of the value changes (each a count of the records changed)
+    def rule_n(name):
+        return (rules.get(name) or {}).get("count", 0)
+
+    def assumed(cat):
+        return sum(a["count"] for a in assumptions if a["category"] == cat)
+    n_tauc = 0
+    for vin, pl in payloads:
+        L = lines_of(pl)
+        if vin == "2.00" and L[0][20:21] == "G":
+            n_tauc += sum(1 for l in L[:next(i for i, x in enumerate(L) if x[60:80].strip() == "END OF HEADER")]
+                          if l[60:80].strip() == "CORR TO SYSTEM TIME" and l[21:40].strip())
+    for what, have, want in (("NAV.GLO.FRAME-TIME-BASIS", rule_n("NAV.GLO.FRAME-TIME-BASIS"), counts["glo-tk"]),
+                             ("NAV.SBAS.FRAME-TIME-BASIS", rule_n("NAV.SBAS.FRAME-TIME-BASIS"), counts["sbas"]),
+                             ("glonass-frame-time-week", assumed("glonass-frame-time-week"), counts["glo-week"]),
+                             ("NAV.GLO.V2.00-SIGNS", rule_n("NAV.GLO.V2.00-SIGNS"), counts["v200"] + n_tauc),
+                             ("glonass-nav-2.00-signs", assumed("glonass-nav-2.00-signs"), counts["v200"] + n_tauc)):
+        if have != want:
+            problems.append(f"{want} record(s) changed by {what}, the report counts {have}")
+    warned = any(w.get("rule") == "NAV.GLO.TK-DAY-BASIS" for w in report.get("warnings", []) or [])
+    if counts["tk-day"] and not (warned or tk_fix):
+        problems.append(f"{counts['tk-day']} GLONASS records hold tk as seconds of the day, the report "
+                        "neither warns (NAV.GLO.TK-DAY-BASIS) nor repairs")
+    if (warned or tk_fix) and not counts["tk-day"]:
+        problems.append("the report says GLONASS tk is on the day basis, no record kept is")
+    return problems
+
+
+def _header_area_claims(rin, rver, outs, losses, target, claimed):
+    """RINEX 4 ionospheric records written into RINEX 2/3 headers: a 4.02 record's subtype
+    (rinex_4.02.txt Table 25 p.40) and a 4.00/4.01 Klobuchar set's Region code (rinex_4.00.txt
+    Table A32 p.104) have no field there (rinex305.txt Table A5 p.65 'QZSA = QZS alpha0 -
+    alpha3'; rinex211.txt Table A3 ION ALPHA/BETA), so each kept set from such a record claims
+    nav-subtype-not-representable or nav-ion-area-not-representable. The header keeps one set
+    per model and system (from 3.02 per type, time mark and SV: rinex305.txt Table A5 p.64-66);
+    the others are claimed nav-correction-extra."""
+    problems = []
+
+    def claim_of(key, m, v, vin):
+        s = key[1][0]
+        m0 = m.split(" ")[0]
+        if vin >= "4.02":
+            return f"nav-subtype-not-representable:{key[0]}:{s}:{m0}" if " " in m else None
+        if "4.00" <= vin < "4.02" and key[0] == "ION" and (s, m0) in _KLOB:
+            region = v[8] if len(v) > 8 else None
+            if s == "J" or region not in (None, 0):
+                return f"nav-ion-area-not-representable:{s}:{m0}"
+        return None
+    order = [(k, m, v, claim_of(k, m, v, vin)) for k, lst in rin.items() if k[0] != "EPH"
+             for (m, v), vin in zip(lst, rver.get(k, []))]
+    n_sub = Counter(c for k, m, v, c in order if c)
+    prefix = {"G": "GPS", "J": "QZS", "C": "BDS", "I": "IRN", "E": "GAL"}
+    head = []
+    for o in outs:
+        for l in lines_of(o):
+            lab = l[60:80].strip()
+            if lab == "IONOSPHERIC CORR":
+                head.append(l)
+            elif lab in ("ION ALPHA", "ION BETA"):
+                # RINEX 2 2X,4D12.4 (rinex211.txt Table A3) read as GPSA / GPSB
+                head.append(("GPSA " if lab == "ION ALPHA" else "GPSB ") + l[2:50].ljust(49))
+    kept = Counter(l[:3] for l in head if l[3:4] in "A ")
+    for cat in set(n_sub) | claimed:
+        c = losses.get(cat, {}).get("count", 0)
+        if c > n_sub[cat]:
+            problems.append(f"{n_sub[cat]} input records with a subtype or area, report claims {c} {cat}")
+    ion = [(k, m, v, c) for k, m, v, c in order if k[0] == "ION"]
+    exact = set()
+    if target >= "3.02":
+        # from 3.02 a Klobuchar set keeps its own place (type, time mark, SV: rinex305.txt
+        # Table A5), so the claims are exact: each kept QZSA/QZSB (GPSA, BDSA, IRNA) pair comes
+        # from the first input record, in file order, of its place with its values, and that
+        # record's subtype or area is lost (Sonnet round 28)
+        for s, p in prefix.items():
+            if s == "E":
+                continue                      # NeQuick (GAL): one line, bounded below
+            exact.add(s)
+            want = Counter()
+            lines_ab = [l for l in head if l[:3] == p and l[3:4] in "AB"]
+            for la in (l for l in lines_ab if l[3:4] == "A"):
+                place = (la[54:55].strip(), la[56:58].strip().lstrip("0"))
+                lb = next((l for l in lines_ab if l[3:4] == "B" and
+                           (l[54:55].strip(), l[56:58].strip().lstrip("0")) == place), None)
+                vals = [_dec(la[5 + 12 * j:17 + 12 * j]) for j in range(4)] + (
+                    [_dec(lb[5 + 12 * j:17 + 12 * j]) for j in range(4)] if lb else [None] * 4)
+                for k, m, v, c in ion:
+                    mark = chr(ord("A") + k[2][3]) if k[2] else ""
+                    if k[1][0] != s or (mark, k[1][1:].lstrip("0")) != place:
+                        continue
+                    if all(_near(a, b) for a, b in zip((list(v) + [None] * 8)[:8], vals) if b is not None):
+                        if c:
+                            want[c] += 1
+                        break
+            got = Counter({cat: losses[cat]["count"] for cat in claimed if cat.split(":")[-3:-1] == ["ION", s]
+                           or cat.split(":")[1:2] == [s]})
+            if +want != +got:
+                problems.append(f"{s}: kept ION sets from records with a subtype or area {dict(want)}, "
+                                f"report claims {dict(got)}")
+    for s, p in prefix.items():
+        if s in exact:
+            continue
+        mine = [cat for cat in claimed if cat.split(":")[-3:-1] == ["ION", s] or cat.split(":")[1:2] == [s]]
+        c = sum(losses.get(cat, {}).get("count", 0) for cat in mine)
+        if c > kept[p]:
+            problems.append(f"{s}: {kept[p]} ION set(s) kept, report claims {c} ({mine})")
+            continue
+        recs_s = [(m, v, cc) for k, m, v, cc in ion if k[1][0] == s]
+        if not kept[p] or not recs_s:
+            continue
+        # which input records the kept set came from: Klobuchar alpha (xxxA) and beta (xxxB)
+        # lines, A4,1X,4D12.4 (rinex305.txt Table A5), against each record's 8 values at that
+        # precision; NeQuick (GAL) cannot be matched, all-or-none applies
+        alpha = next((l for l in head if l[:4] == p + "A"), None)
+        beta = next((l for l in head if l[:4] == p + "B"), None)
+        if alpha is None or beta is None:
+            matched = [cc for m, v, cc in recs_s]
+        else:
+            want = [_dec(alpha[5 + 12 * j:17 + 12 * j]) for j in range(4)] + \
+                   [_dec(beta[5 + 12 * j:17 + 12 * j]) for j in range(4)]
+            matched = [cc for m, v, cc in recs_s
+                       if all(_near(a, b) for a, b in zip((list(v) + [None] * 8)[:8], want))]
+        if matched and all(matched) and not c:
+            problems.append(f"{s}: the kept ION set comes from records with a subtype or area "
+                            f"({sorted(set(matched))[:2]}), report claims none")
+        if matched and not any(matched) and c:
+            problems.append(f"{s}: the kept ION set comes from records without a subtype or area, "
+                            f"report claims {c}")
     return problems
 
 

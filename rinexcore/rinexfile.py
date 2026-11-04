@@ -62,6 +62,10 @@ def read_path(path):
 def open_container(data):
     """Strip compression layers and expand Hatanaka, returning a Container."""
     payload, layers = compress.unwrap(data)
+    from .io import archive
+    if archive.is_tar_payload(payload):
+        raise InvocationError("this is a tar archive, not one RINEX file: the command line "
+                              "converts each RINEX file in it (python -m rinexconv ARCHIVE --to VERSION)")
     c = Container(payload=payload, layers=layers)
     from .io import hatanaka
     if hatanaka.is_crx(payload):

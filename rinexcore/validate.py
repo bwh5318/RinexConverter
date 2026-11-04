@@ -141,6 +141,9 @@ RULES = {
     "VAL.NAV.EXPONENT.DEPRECATED": "exponent letter D/d in RINEX 4 (strongly deprecated)",
     "VAL.NAV.SYSTEM": "satellite system not defined for this version or file type",
     "VAL.NAV.BLANK-LINE": "blank line between records",
+    "VAL.NAV.FIELDS": "a value after the last field a RINEX 4 record line defines",
+    "VAL.NAV.SPARE": "a value in a spare field (RINEX 4: any, to be left blank; RINEX 2/3: non-zero)",
+    "VAL.NAV.GLO.TK-DAY-BASIS": "GLONASS message frame time as seconds of the day, not of the UTC week",
     # meteorological
     "VAL.MET.TYPES.COUNT": "declared number of met types differs from the list",
     "VAL.MET.TYPES.LAYOUT": "met types not in their columns",
@@ -1155,7 +1158,7 @@ class _Obs:
                 if not ok:
                     self.complete = False
                     return
-                if flag in (3, 4):
+                if 2 <= flag <= 5:          # every event flag (rinex211.txt section 0.4 l.241)
                     lines = [(n, c) for n, lab, c in recs if lab == "SYS / # / OBS TYPES"]
                     if lines:
                         new = self.parse_v3_types(lines, DATA)
@@ -1380,13 +1383,28 @@ class _Obs:
             if key is not None:
                 prev = self.epoch_time(key, lineno, flag, prev)
             if 2 <= flag <= 5:
-                if line[32:].strip():
+                # an event has no satellite list (columns 33-68 blank), but the record's
+                # optional receiver clock offset F12.9 in columns 69-80 is its own field
+                # (rinex211.txt Table A2: one EPOCH/SAT or EVENT FLAG record layout)
+                if line[32:68].strip():
                     out.err("VAL.OBS.EPOCH.SYNTAX", "event record: text after the record count", lineno, 33)
+                clk = line[68:80]
+                if clk.strip():
+                    self.clock_seen = True
+                    if not _V2_CLOCK(clk):
+                        if _VALUE_LENIENT(clk):
+                            out.warn("VAL.OBS.EPOCH.FORMAT", f"receiver clock offset {clk.strip()!r} "
+                                     "not F12.9", lineno, 69)
+                        else:
+                            out.err("VAL.OBS.EPOCH.SYNTAX", f"receiver clock offset {clk.strip()!r} "
+                                    "unreadable (F12.9, columns 69-80)", lineno, 69)
+                if line[80:].strip():
+                    out.err("VAL.OBS.EPOCH.SYNTAX", "text after column 80 of the epoch record", lineno, 81)
                 recs, ok = self.event_records(nsat, flag, lineno)
                 if not ok:
                     self.complete = False
                     return
-                if flag in (3, 4):
+                if 2 <= flag <= 5:          # every event flag (rinex211.txt section 0.4 l.241)
                     lines = [(n, c) for n, lab, c in recs if lab == "# / TYPES OF OBSERV"]
                     if lines:
                         new = self.parse_v2_types(lines, DATA)
@@ -1834,6 +1852,96 @@ V402_OTHER_MSGS = {"L1NV", "LXOC"}
 # p.120), NavIC NeQuick-N 7 (Table A39 p.121), GLONASS LXOC 1 (Table A40 p.122).
 _ION_LINES = {("E", "IFNV", ""): 2, ("C", "CNVX", ""): 3, ("I", "L1NV", "KLOB"): 4,
               ("I", "L1NV", "NEQN"): 7, ("R", "LXOC", ""): 1}
+# Numeric fields a RINEX 4 record line defines, line 0 (the SV / EPOCH line) first; a value
+# after them is no field of the version ("4X,2E19.12" defines two). rinex_4.02.txt Tables A9
+# p.79 (LNAV orbit 7: t_tm, fit interval), A10 p.81 / A20 p.96 (CNAV orbit 8: t_tm, wn_op,
+# and from 4.02 the optional integer flags), A11 p.83 / A21 p.98 (CNV2 orbit 8: ISC_L1Cd/Cp;
+# orbit 9: t_tm, wn_op, 4.02 flags), A13 p.85 (Galileo orbit 5: 3, orbit 7: t_tm), A23 p.100
+# (BDS D1/D2 orbit 7: t_tm, AODC), A26 p.106 (CNV3 orbit 8: t_tm), A30 p.111 (NavIC orbit 7:
+# t_tm); spares inside a line ('Spare A19', section 6.4 p.48) are fields. rinex_4.00.txt and
+# rinex_4.01.txt define the same (e.g. rinex_4.01.txt Table A10 l.4419 p.79: CNAV orbit 8
+# 4X,2E19.12). STO line 1 (Table A33 p.115), EOP lines (A34 p.116): 4. ION Klobuchar (A35
+# p.117): line 2 Beta3 only in 4.02, Beta3 and the Region code in 4.00/4.01 (rinex_4.00.txt
+# Table A32 p.104); NeQuick-G (A36 p.118) line 1: the flags; BDGIM (A37 p.119) line 2: 2.
+_V4_FIELDS = {
+    ("EPH", "G", "LNAV"): (3, 4, 4, 4, 4, 4, 4, 2), ("EPH", "J", "LNAV"): (3, 4, 4, 4, 4, 4, 4, 2),
+    ("EPH", "G", "CNAV"): (3, 4, 4, 4, 4, 4, 4, 4, 2), ("EPH", "J", "CNAV"): (3, 4, 4, 4, 4, 4, 4, 4, 2),
+    ("EPH", "G", "CNV2"): (3, 4, 4, 4, 4, 4, 4, 4, 2, 2), ("EPH", "J", "CNV2"): (3, 4, 4, 4, 4, 4, 4, 4, 2, 2),
+    ("EPH", "E", "INAV"): (3, 4, 4, 4, 4, 3, 4, 1), ("EPH", "E", "FNAV"): (3, 4, 4, 4, 4, 3, 4, 1),
+    ("EPH", "R", "FDMA"): (3, 4, 4, 4, 4),
+    ("EPH", "C", "D1"): (3, 4, 4, 4, 4, 4, 4, 2), ("EPH", "C", "D2"): (3, 4, 4, 4, 4, 4, 4, 2),
+    ("EPH", "C", "CNV1"): (3,) + (4,) * 9, ("EPH", "C", "CNV2"): (3,) + (4,) * 9,
+    ("EPH", "C", "CNV3"): (3, 4, 4, 4, 4, 4, 4, 4, 1),
+    ("EPH", "S", "SBAS"): (3, 4, 4, 4), ("EPH", "I", "LNAV"): (3, 4, 4, 4, 4, 4, 4, 1),
+    ("ION", "E", "IFNV"): (3, 1), ("ION", "C", "CNVX"): (3, 4, 2),
+}
+_V402_FLAGS = {("EPH", "G", "CNAV"), ("EPH", "J", "CNAV"), ("EPH", "G", "CNV2"), ("EPH", "J", "CNV2")}
+_KLOB_ION = {("G", "LNAV"), ("J", "LNAV"), ("I", "LNAV"), ("C", "D1D2"), ("G", "CNVX"), ("J", "CNVX")}
+# STO satellite systems: G,R,E,C,J,I in 4.00/4.01 (rinex_4.00.txt Table A30 p.102,
+# rinex_4.01.txt l.6062 p.106), + S in 4.02 (rinex_4.02.txt Table A33 p.115)
+_STO_SYSTEMS = {"4.00": "GRECJI", "4.01": "GRECJI", "4.02": "GRECJIS"}
+# Spare fields of RINEX 2/3 record lines, {line: field indexes}: GPS orbit 7 fields 3-4
+# (rinex211.txt Table A4 l.1411-1412; rinex305.txt Table A6 p.69); Galileo orbit 5 field 4,
+# orbit 7 fields 2-4 (rinex305.txt Table A8 p.71-72); QZSS orbit 7 fields 3-4 (3.02: also orbit
+# 5 field 4, rinex302.txt Table A12 p.71-72); BDS orbit 5 fields 2 and 4, orbit 7 fields 3-4
+# (rinex305.txt Table A14 p.79-80); NavIC orbit 5 fields 2 and 4, orbit 6 field 4, orbit 7
+# fields 2-4 (rinex305.txt Table A18 p.83-84); 2.10 GEO orbit 3 field 4 (rinex210.txt Table
+# A16 l.1671; the IODN from 2.11)
+_V23_SPARE_FIELDS = {"G": {7: (2, 3)}, "E": {5: (3,), 7: (1, 2, 3)}, "J": {7: (2, 3)},
+                     "C": {5: (1, 3), 7: (2, 3)}, "I": {5: (1, 3), 6: (3,), 7: (1, 2, 3)}}
+# Spare fields inside RINEX 4 lines, {line: field indexes} (line 0 the SV / EPOCH line):
+# "Spare fields are to be left blank" (rinex_4.02.txt section 6.4 p.48; rinex_4.00.txt p.43;
+# rinex_4.01.txt p.46). rinex_4.02.txt Tables A16/A17 p.90-91 (GLONASS L1OC/L3OC orbit 8),
+# A23 p.100 (BDS D1/D2 orbit 5), A24 p.102 (CNV1 orbits 7, 9), A25 p.104 (CNV2 orbits 7, 9),
+# A30 p.110-111 (NavIC LNAV orbits 5, 6), A31 p.112 (L1NV orbit 5), A34 p.116 (EOP line 1).
+_V4_SPARE_FIELDS = {
+    ("EPH", "R", "L1OC"): {8: (2,)}, ("EPH", "R", "L3OC"): {8: (2,)},
+    ("EPH", "C", "D1"): {5: (1, 3)}, ("EPH", "C", "D2"): {5: (1, 3)},
+    ("EPH", "C", "CNV1"): {7: (1,), 9: (1, 2)}, ("EPH", "C", "CNV2"): {7: (0,), 9: (1, 2)},
+    ("EPH", "I", "LNAV"): {5: (1, 3), 6: (3,)}, ("EPH", "I", "L1NV"): {5: (2,)},
+    ("EOP",): {1: (0,)},
+}
+
+
+def _v4_fields(tv, kind, s, msg):
+    """Fields per line of a RINEX 4 record (line 0 first; None: not checked)."""
+    if kind == "STO":
+        return (None, 4)
+    if kind == "EOP":
+        return (3, 4, 4)
+    if kind == "ION" and (s, msg) in _KLOB_ION:
+        return (3, 4, 1 if tv >= "4.02" else 2)
+    f = _V4_FIELDS.get((kind, s, msg))
+    if f is not None and tv >= "4.02" and (kind, s, msg) in _V402_FLAGS:
+        f = f[:-1] + (f[-1] + 1,)
+    return f
+
+
+def _glo_tk_day(line):
+    """True for a RINEX 3/4 GLONASS SV / EPOCH line whose message frame time (columns 62-80)
+    is clearly seconds of the day, not '(tk+nd*86400) in seconds of the UTC week'
+    (rinex302.txt Table A10 p.69, rinex303.txt p.78, rinex305.txt Table A10 p.74): below
+    86400, Toc not a Sunday, more than 12 h from Toc's seconds of week (circularly) and,
+    read as seconds of day, within 12 h of Toc's (a week-basis tk lies within about a quarter
+    of an hour of Toc)."""
+    m = _NAV_LENIENT(line[61:80].strip())
+    if not m or not line[61:80].strip():
+        return False
+    try:
+        v = float(re.sub(r"[DdEe]", "E", line[61:80].strip()))
+        t = datetime.datetime(int(line[4:8]), int(line[9:11]), int(line[12:14]))
+        sod = int(line[15:17]) * 3600 + int(line[18:20]) * 60 + int(line[21:23])
+    except ValueError:
+        return False
+    dow = (t.weekday() + 1) % 7
+
+    def cdist(a, c, m):
+        d = abs(a - c) % m
+        return min(d, m - d)
+    return (0 <= v < 86400 and dow != 0 and cdist(v, dow * 86400 + sod, 604800) > 43200
+            and cdist(v, sod, 86400) <= 43200)
+
+
 _ION_SUBTYPES = {("J", "CNVX"): {"WIDE", "JAPN"}, ("I", "L1NV"): {"KLOB", "NEQN"}}   # Table 25
 
 _NAV_TOKEN = re.compile(r"-?\d?\.\d+[DdEe][+-]\d\d").fullmatch
@@ -1882,6 +1990,8 @@ class _Nav:
         if not end:
             return
         self.systems = set()
+        self.tk_day = []            # lines of GLONASS records with tk on the day basis (_glo_tk_day)
+        self.spares = []            # lines of RINEX 4 records with a value in a spare field
         if tv < "3":
             self.scan_v2(ft)
         elif tv < "4":
@@ -1889,6 +1999,14 @@ class _Nav:
         else:
             self.scan_v4()
         self.exponents()
+        if self.spares:
+            self.out.warn("VAL.NAV.SPARE", f"{len(self.spares)} record line(s) hold a value in a spare field "
+                          "('Spare fields are to be left blank so as to avoid confusion', rinex_4.02.txt "
+                          "section 6.4 p.48; rinex305.txt section 6.4 p.42)", self.spares[0], None)
+        if self.tk_day:
+            self.out.warn("VAL.NAV.GLO.TK-DAY-BASIS", f"{len(self.tk_day)} GLONASS record(s) hold the "
+                          "message frame time as seconds of the day, not '(tk+nd*86400) in seconds of the "
+                          "UTC week' (rinex302.txt Table A10 p.69, rinex303.txt p.78)", self.tk_day[0], 62)
         letter = self.first[40:41].strip().upper()
         if tv >= "3" and letter and letter != "M" and self.systems - {letter}:
             out = self.out
@@ -1975,6 +2093,7 @@ class _Nav:
                     continue
                 cur[1] += 1
                 self.numbers(line, (3, 22, 41, 60), lineno)
+                self.spares23(line, lineno, cur[2], cur[1] - 1, 3)
                 self.layout(line, 79, lineno)
                 continue
             if not line[0:2].strip():
@@ -2044,6 +2163,7 @@ class _Nav:
                     continue
                 cur[1] += 1
                 self.numbers(line, (4, 23, 42, 61), lineno)
+                self.spares23(line, lineno, cur[2], cur[1] - 1, 4)
                 self.layout(line, 80, lineno)
                 continue
             s = line[0]
@@ -2059,6 +2179,8 @@ class _Nav:
             cur = [lineno, 1, s, glo if s == "R" else NAV_LINES_V3.get(s)]
             if not _V3_NAV_HEAD(line):
                 self.epoch_slow_v3(line, lineno, 0, True)
+            elif s == "R" and _glo_tk_day(line):
+                self.tk_day.append(lineno)
             self.numbers(line, (23, 42, 61), lineno)
             self.layout(line, 80, lineno)
 
@@ -2097,6 +2219,7 @@ class _Nav:
         cur = None        # [lineno, nlines, want, label]
         body_first = False
         kind = sat = None
+        fields = None
         while True:
             line = rd.next()
             if line is None or line[:1] == ">":
@@ -2116,6 +2239,7 @@ class _Nav:
                 kind, sat, msg, sub, want = self.record_head(line, lineno)
                 cur = [lineno, 0, want, f"{kind} {sat} {msg}".strip()]
                 body_first = True
+                fields = _v4_fields(tv, kind, sat[:1], msg)
                 continue
             if cur is None:
                 out.err("VAL.NAV.RECORD.START", "data line before the first '>' record header", lineno, 1)
@@ -2129,12 +2253,15 @@ class _Nav:
                                 f"line names {sat}", lineno, 1)
                     if not _V3_NAV_HEAD(line):
                         self.epoch_slow_v3(line, lineno, 0, True)
+                    elif sat[:1] == "R" and msg == "FDMA" and _glo_tk_day(line):
+                        self.tk_day.append(lineno)
                     self.numbers(line, (23, 42, 61), lineno)
                 else:
                     if not _V4_EPOCH(line):
                         self.epoch_slow_v3(line, lineno, 0, False)
                     if kind != "STO":
                         self.numbers(line, (23, 42, 61), lineno)
+                self.fields(line, lineno, 0, 23, fields, cur[3])
                 self.layout(line, 80, lineno)
                 continue
             if line[0:4].strip():
@@ -2142,7 +2269,45 @@ class _Nav:
                         "line nor a '>' record header", lineno, 1)
                 continue
             self.numbers(line, (4, 23, 42, 61), lineno)
+            self.fields(line, lineno, cur[1] - 1, 4, fields, cur[3])
             self.layout(line, 80, lineno)
+
+    def spares23(self, line, lineno, s, k, start):
+        """A non-zero value in a spare field of a RINEX 2/3 record line k (_V23_SPARE_FIELDS)
+        is noted (one VAL.NAV.SPARE warning per file). Zero is not: before 3.05 the tables say
+        only 'spare', and 3.05 'recommended to be left blank' (rinex305.txt section 6.4 p.42)."""
+        tv = self.tv
+        table = _V23_SPARE_FIELDS.get(s, {})
+        if s == "S" and tv < "2.11":
+            table = {3: (3,)}
+        elif s == "J" and tv < "3.03":
+            table = {**table, 5: (3,)}
+        for j in table.get(k, ()):
+            t = line[start + 19 * j:start + 19 * (j + 1)].strip()
+            if t and _NAV_LENIENT(t):
+                try:
+                    if float(re.sub(r"[DdEe]", "E", t)) != 0:
+                        self.spares.append(lineno)
+                except ValueError:
+                    pass
+
+    def fields(self, line, lineno, k, start, fields, label):
+        """No value after the last field line k of a RINEX 4 record defines (_v4_fields), and
+        none in its spare fields (_V4_SPARE_FIELDS: noted, one warning per file)."""
+        t = label.split()
+        key = (t[0], t[1][:1], t[2]) if len(t) >= 3 else None
+        if t and t[0] == "EOP":
+            key = ("EOP",)
+        for j in _V4_SPARE_FIELDS.get(key, {}).get(k, ()):
+            a = start + 19 * j
+            if line[a:a + 19].strip():
+                self.spares.append(lineno)
+        if fields is None or k >= len(fields) or fields[k] is None:
+            return
+        a = start + 19 * fields[k]
+        if line[a:80].strip():
+            self.out.err("VAL.NAV.FIELDS", f"{label} line {k}: a value in columns {a + 1}-80, after the "
+                         f"{fields[k]} field(s) RINEX {self.tv} defines there", lineno, a + 1)
 
     def record_head(self, line, lineno):
         """Check a '> EPH G01 LNAV' line (rinex_4.02.txt sec. 5.4.1 p.38-40, Tables 19-25).
@@ -2174,6 +2339,9 @@ class _Nav:
             self.systems.add(s)
         if s not in NAV_SYSTEMS[tv]:
             out.err("VAL.NAV.SYSTEM", f"system {s!r} is not defined in RINEX {tv}", lineno, 7)
+        elif kind == "STO" and s not in _STO_SYSTEMS.get(tv, NAV_SYSTEMS[tv]):
+            out.err("VAL.NAV.SYSTEM", f"STO records of system {s!r} are not defined in RINEX {tv} "
+                    "(rinex_4.00.txt Table A30 p.102: G,R,E,C,J,I; S from 4.02, Table A33 p.115)", lineno, 7)
         sat = s + prn if prn.strip() else s
         if kind == "EPH":
             if not prn.strip():
@@ -2204,6 +2372,12 @@ class _Nav:
             if subs is not None and sub not in subs:
                 out.err("VAL.NAV.RECORD.TYPE", f"ION {s} {msg} needs a subtype {sorted(subs)} "
                         "(rinex_4.02.txt Table 25)", lineno, 16)
+            elif subs is None and sub and tv >= "4.02" and (s, msg) == ("J", "LNAV") and sub in ("WIDE", "JAPN"):
+                # Table A35 note 3* gives the area to CNVX only; DLR (BRD400DLR) writes it on LNAV
+                # too, and so does this converter (user decision 2026-11-02): a warning, no error
+                out.warn("VAL.NAV.RECORD.TYPE", f"ION J LNAV with subtype {sub!r}: rinex_4.02.txt Table A35 "
+                         "note 3* gives the area to CNVX only; DLR's practice (BRD400DLR), followed here",
+                         lineno, 16)
             elif subs is None and sub:
                 out.warn("VAL.NAV.RECORD.TYPE", f"ION {s} {msg} has no subtypes in RINEX {tv} "
                          f"(the field shall be left blank); {sub!r} given", lineno, 16)
