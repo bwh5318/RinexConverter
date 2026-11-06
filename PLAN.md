@@ -1059,15 +1059,19 @@ and drift need.
   the Galileo OS SIS ICD, the BDS ICDs, the GLONASS ICD and the NavIC ICD for orbits; Montenbruck
   et al. for SISRE weights. Squidy's `math.md` is the template.
 
-### 5.10 Open decisions (the user's)
+### 5.10 Decisions (the user's)
 
-| # | Decision | Proposed |
-|---|---|---|
-| D1 | What QC does with a file the reader refuses as damaged | Compliance findings only; `--lenient` reads it, each metric keeping its own status plus a `lenient-read` flag |
-| D2 | Downloads from outside CDDIS and BKG: `igs20.atx`, `rcvr_ant.tab`, the IGS satellite metadata SINEX, site logs (files.igs.org), and fetching Anubis and RTKLIB | Fetch each once, record its version and sha256, as for the oracles |
-| D3 | Galileo single-frequency ionosphere in SPP | Klobuchar as a reported approximation first; NeQuick-G later if wanted |
-| D4 | The grading profile (weights, which metrics count) | Drafted at Q5, shown with the report, approved by the user |
-| D5 | SNR units when the header does not say | Relative values; dB-Hz only for receivers the user lists |
+D1-D5 were put to the user in Q0a and answered on 2026-11-06; each answer is the proposal
+(docs/DECISIONS.md, "Q0a"). D6 came up in Q0a and was answered the same day.
+
+| # | Decision | Proposed | The user's answer |
+|---|---|---|---|
+| D1 | What QC does with a file the reader refuses as damaged | Compliance findings only; `--lenient` reads it, each metric keeping its own status plus a `lenient-read` flag | **As proposed** (2026-11-06) |
+| D2 | Downloads from outside CDDIS and BKG: `igs20.atx`, `rcvr_ant.tab`, the IGS satellite metadata SINEX, site logs (files.igs.org), and fetching Anubis and RTKLIB | Fetch each once, record its version and sha256, as for the oracles | **As proposed**: once each, pinned (URL, version, date, sha256), gitignored, re-fetched only when the user asks (2026-11-06) |
+| D3 | Galileo single-frequency ionosphere in SPP | Klobuchar as a reported approximation first; NeQuick-G later if wanted | **As proposed** (2026-11-06) |
+| D4 | The grading profile (weights, which metrics count) | Drafted at Q5, shown with the report, approved by the user | **As proposed**: no grade before Q5 (2026-11-06) |
+| D5 | SNR units when the header does not say | Relative values; dB-Hz only for receivers the user lists | **As proposed** (2026-11-06). In the corpus, 55 of the 185 RINEX 3/4 obs files have no `SIGNAL STRENGTH UNIT`, and RINEX 2 cannot state one |
+| D6 | The ICD texts (IS-GPS-200, Galileo OS SIS ICD, BDS ICDs, GLONASS ICD, IS-QZSS, NavIC ICD) that nav QC (§5.4), healthy-nav completeness (§5.6) and SISRE cite: not in `specs/`, a download outside CDDIS and BKG, and `specs/` is read-only | Fetch each once from its operator, pinned as D2, into a new gitignored folder | **As proposed**, in Q0b, with the text extracted with page markers as `specs/text/` (2026-11-06) |
 
 ---
 

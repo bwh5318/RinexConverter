@@ -1,0 +1,2335 @@
+{
+ "_doc": "Which rinexqc result fields may change when a file is converted by rinexconv, and how (PLAN.md rev. 4 §5.1 item 4; docs/QC_METRICS.md §7 gate E3). Written in Q0a from the specs, the loss table (tests/expectations/allowed_losses.json) and the converter's report categories (rinexconv/report.py: losses, repairs, normalisations, assumptions; plus the rule and warning names that change data), before any rinexqc code. The Q1 test runs rinexqc on a file and on each rinexconv conversion of it, with the same inputs, and compares: every metric in 'physical' must be equal on the scopes both results hold; any other difference must be allowed by an entry below for a category present in that conversion's report. A category the report holds that this file does not list fails the test: a new converter category needs an entry here first.",
+ "schema": "qc-invariance/0",
+ "status": "v0, Q0a, 2026-11-06 (revised after review rounds 1 and 2): signed off by the user with Q1's gates on 2026-11-06; frozen with the commit that records it",
+ "comparison": {
+  "inputs": "Both runs get the same inputs (the same nav companion, --glo-fcn, --overrides, SNR receiver table) and the same options. If the source can be read only with --lenient, both runs use --lenient, so lenient_read is true in both. A difference caused only by an input or option one run lacked is a test error, not an allowed change. When a conversion drops GLONASS SLOT / FRQ #, the target run gets the source's channels as --glo-fcn, so both runs know the same channels.",
+  "epochs": "Data epochs are matched by time, after the shift a 'time' effect below names (OBS.TIME-SYSTEM.BDT-TO-GPS: +14 s).",
+  "signals": "Scopes are matched by the adapter's canonical signal key (QC_METRICS §1.2): '<system>:<code>' with the RINEX 3/4 code (band digits normalised, so OBS.BDS-B1I-BAND needs no entry) or the RINEX 2 code ('G:C1', 'G:P1', 'G:P2'; never merged), and '#2' for a second column. RINEX 2 -> 3/4: each source key maps to the target code named by the report's obs-code-attribute assumption (detail 'C2->C2X', 'P2->C2W'). RINEX 3/4 -> 2: each source code named by a rule OBS.V3V2.CODEMAP.<sys>.<code> maps to the 2-character code rinexconv.codemap.v3_to_v2 gives for it (tests may use rinexconv: PLAN §3.9); where several source codes map to one target code, the obs-code-collapsed loss says which was kept and the others are 'absent'. RINEX 3/4 <-> 3/4: the same code, after band normalisation.",
+  "scopes": "The source run is restricted with --select to the systems and signals the target holds (QC_SCHEMA §1), so every per-scope value, file-level aggregate and detector (whose common estimates are medians over satellites) is computed on identical support in both runs. A scope present in one result only must still be explained by an 'absent' effect; removing it from the source run is what --select does for the comparison.",
+  "reals": "Integers and classes exactly. Reals within 1e-9 relative (or 1e-12 absolute near zero), unless an effect gives a bound. Under a category with a bound: (1) a detector event may be present in one run only if its test statistic in the other run is within the propagated bound of the threshold (the test computes the margin); (2) a value that the rounding brings to exactly 0.000 becomes missing, so counts, coverage, arcs and detector support may change at exactly those observations, which the test finds from the source values.",
+  "out_of_scope": "Conversions with several inputs (--merge) and refusals; the invariance test covers single-file conversions that end converted, converted-with-assumptions or converted-with-removal.",
+  "support_changes": "Retired: with the source run restricted by --select (comparison.scopes), systems, codes or channels removed by the conversion no longer change detector support, so their 'support' effects below hold only for an unrestricted run (a user comparing results by hand)."
+ },
+ "change_kinds": {
+  "none": "No QC field may change because of this category.",
+  "absent": "The named scopes are absent from the target result (the data are gone).",
+  "value": "The named values may change, as 'how' says, within 'bound' when given.",
+  "unit": "The unit may change from 'from' to 'to'; the numbers stay equal.",
+  "status": "The status may change from 'from' to 'to'.",
+  "support": "Support counts may decrease (or increase, if 'how' says so); values computed on what remains must still agree where both are testable.",
+  "time": "Epoch times shift by 'shift_s'; values that are times shift with them; durations, counts and differences do not change.",
+  "provenance": "Only provenance and header-echo fields change."
+ },
+ "always_differ": [
+  {
+   "fields": [
+    "input.path",
+    "input.version",
+    "input.wrappers",
+    "input.sha256",
+    "input.decoded_sha256",
+    "inputs[role=obs|nav|met].name",
+    "inputs[role=obs|nav|met].sha256",
+    "inputs[role=obs|nav|met].version",
+    "run.*",
+    "tool.*"
+   ],
+   "how": "provenance of a different file"
+  },
+  {
+   "fields": [
+    "obs.compliance",
+    "nav.compliance",
+    "met.compliance"
+   ],
+   "how": "the validator's findings on the target are those the conversion report lists as inherited (VAL.INHERITED); every other source finding may disappear"
+  }
+ ],
+ "physical": [
+  {
+   "metric": "obs.time.span",
+   "compare": "times after any 'time' shift; duration exactly"
+  },
+  {
+   "metric": "obs.time.grid",
+   "compare": "delta exactly; median offset after any 'time' shift, modulo delta"
+  },
+  {
+   "metric": "obs.time.order",
+   "compare": "exact"
+  },
+  {
+   "metric": "obs.time.jitter",
+   "compare": "statistics and jump epochs; bound 1e-7 s under epoch-precision"
+  },
+  {
+   "metric": "obs.time.gaps",
+   "compare": "exact, file and satellite"
+  },
+  {
+   "metric": "obs.arcs",
+   "compare": "exact"
+  },
+  {
+   "metric": "obs.avail.observed",
+   "compare": "per (satellite, signal), exact"
+  },
+  {
+   "metric": "obs.avail.coverage",
+   "compare": "per (satellite, band), exact ratios of equal counts"
+  },
+  {
+   "metric": "obs.avail.flags",
+   "compare": "the canonical counts lost-lock, half-cycle and overflow-clip-candidate exactly; the raw bit counts as the categories say"
+  },
+  {
+   "metric": "obs.snr.dist",
+   "compare": "numbers per (satellite, signal); unit per category"
+  },
+  {
+   "metric": "obs.snr.dropouts",
+   "compare": "events exactly (unit per category)"
+  },
+  {
+   "metric": "obs.clock.code_jumps",
+   "compare": "events at least twice the stated limit in both runs: epoch exactly, class exactly, size within max(1e-3 m, 1e-9 relative); weaker events by comparison.reals rule (1)"
+  },
+  {
+   "metric": "obs.clock.phase_jumps",
+   "compare": "events at least twice the stated limit in both runs: epoch exactly, class exactly, size within max(1e-3 m, 1e-9 relative); weaker events by comparison.reals rule (1)"
+  },
+  {
+   "metric": "obs.clock.tag_jumps",
+   "compare": "events exactly; bound 1e-7 s under epoch-precision"
+  },
+  {
+   "metric": "obs.clock.class",
+   "compare": "exact"
+  },
+  {
+   "metric": "obs.clock.offset",
+   "compare": "series statistics; bound 5e-10 s under clock-precision"
+  },
+  {
+   "metric": "nav.coverage",
+   "compare": "per satellite, exact"
+  },
+  {
+   "metric": "nav.gaps",
+   "compare": "exact"
+  },
+  {
+   "metric": "nav.health",
+   "compare": "exact"
+  },
+  {
+   "metric": "nav.iod",
+   "compare": "exact"
+  },
+  {
+   "metric": "nav.times",
+   "compare": "exact"
+  },
+  {
+   "metric": "nav.duplicates",
+   "compare": "exact"
+  },
+  {
+   "metric": "nav.ranges",
+   "compare": "exact (findings), on the fields both hold"
+  },
+  {
+   "metric": "nav.glo_tk_basis",
+   "compare": "exact"
+  },
+  {
+   "metric": "met.time",
+   "compare": "exact"
+  },
+  {
+   "metric": "met.ranges",
+   "compare": "exact"
+  },
+  {
+   "metric": "met.jumps",
+   "compare": "exact"
+  },
+  {
+   "_note": "Q3 adds obs.combo.*, obs.mp, obs.cmc, obs.iono.*, obs.slips.*, obs.phase_noise here, with their entries for the phase-alignment categories."
+  }
+ ],
+ "loss": [
+  {
+   "kind": "obs",
+   "category": "system-not-representable:*",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "every per-scope entry of the removed system"
+     ]
+    },
+    {
+     "change": "value",
+     "fields": [
+      "obs.avail.coverage (system scope)",
+      "obs.header.counts",
+      "obs.header.blank_types"
+     ],
+     "how": "recomputed without the system"
+    },
+    {
+     "change": "support",
+     "fields": [
+      "obs.clock.*"
+     ],
+     "how": "fewer satellites per epoch; only for an unrestricted run (comparison.support_changes)"
+    }
+   ],
+   "cite": "allowed_losses.json systems table"
+  },
+  {
+   "kind": "obs",
+   "category": "system-removed-unresolvable:*",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "every per-scope entry of the removed system"
+     ]
+    },
+    {
+     "change": "support",
+     "fields": [
+      "obs.clock.*"
+     ],
+     "how": "as system-not-representable; only for an unrestricted run (comparison.support_changes)"
+    }
+   ],
+   "cite": "PLAN §1 clause 8 (--drop-unresolvable)"
+  },
+  {
+   "kind": "obs",
+   "category": "epoch-emptied-by-system-removal",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.time.span",
+      "obs.time.gaps (file)",
+      "obs.time.grid",
+      "obs.time.jitter",
+      "obs.header.interval"
+     ],
+     "how": "the emptied epochs are gone: new file gaps appear exactly there (as many epochs as the loss counts); span and inferred delta may change"
+    },
+    {
+     "change": "support",
+     "fields": [
+      "obs.clock.*"
+     ],
+     "how": "the emptied epochs are not testable"
+    }
+   ],
+   "cite": "allowed_losses.json rule; rinex305.txt Table A3 p.58"
+  },
+  {
+   "kind": "obs",
+   "category": "obs-code-not-representable:*",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "per-scope entries of that signal in obs.avail.*, obs.snr.*, obs.header.blank_types"
+     ]
+    },
+    {
+     "change": "value",
+     "fields": [
+      "obs.avail.coverage"
+     ],
+     "how": "code-with-phase and multi-frequency fractions recomputed without the signal"
+    },
+    {
+     "change": "support",
+     "fields": [
+      "obs.clock.*"
+     ],
+     "how": "a satellite whose only code or phase was the signal leaves the tests; only for an unrestricted run (comparison.support_changes)"
+    }
+   ],
+   "cite": "per-version code tables; tests/expectations/code_validity.json"
+  },
+  {
+   "kind": "obs",
+   "category": "obs-code-collapsed:*",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "per-scope entries of the attributes not kept"
+     ]
+    },
+    {
+     "change": "value",
+     "fields": [
+      "scope key of the kept signal"
+     ],
+     "how": "the RINEX 2 target key has attribute '?'; its values equal those of the source attribute the converter kept"
+    }
+   ],
+   "cite": "rinex211.txt Table A1: one 2-character code per band and type"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:SIGNAL STRENGTH UNIT",
+   "effects": [
+    {
+     "change": "unit",
+     "fields": [
+      "obs.snr.dist",
+      "obs.snr.dropouts"
+     ],
+     "from": "dB-Hz",
+     "to": "relative",
+     "how": "unless the SNR receiver table (D5) lists the target's receiver type; unit_source changes from header to default or table"
+    },
+    {
+     "change": "status",
+     "fields": [
+      "obs.snr.dist",
+      "obs.snr.dropouts"
+     ],
+     "from": "ok",
+     "to": "degraded(snr-unit-relative)"
+    },
+    {
+     "change": "status",
+     "fields": [
+      "obs.snr.ssi_consistency"
+     ],
+     "from": "ok",
+     "to": "not-applicable(not-in-version)"
+    },
+    {
+     "change": "value",
+     "fields": [
+      "obs.snr.dropouts"
+     ],
+     "how": "the threshold changes with the unit (T-snr: 8 dB-Hz against 4 sigma of the arc), so events may differ"
+    }
+   ],
+   "cite": "rinex300.txt p.28; RINEX 2 has no such record"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:GLONASS SLOT / FRQ #",
+   "effects": [
+    {
+     "change": "support",
+     "fields": [
+      "obs.clock.*"
+     ],
+     "how": "GLONASS FDMA satellites leave the phase tests unless the run has --glo-fcn or a nav file (the comparison gives both runs the same inputs, so with a companion nothing changes); only for an unrestricted run (comparison.support_changes)"
+    },
+    {
+     "change": "status",
+     "fields": [
+      "per-scope GLONASS FDMA entries of metrics needing a wavelength"
+     ],
+     "from": "ok",
+     "to": "cannot-compute(no-channel)",
+     "how": "only without a channel input"
+    }
+   ],
+   "cite": "rinex301.txt p.32 (optional), mandatory from 3.02"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:SYS / DCBS APPLIED",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "applied-corrections note of the metrics they affect (Q3 on)"
+     ],
+     "how": "known becomes unknown"
+    }
+   ],
+   "cite": "rinex305.txt §5.2.9 p.26"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:SYS / PCVS APPLIED",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "applied-corrections note of the metrics they affect (Q3 on)"
+     ],
+     "how": "known becomes unknown"
+    }
+   ],
+   "cite": "rinex305.txt §5.2.10 p.26"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:GLONASS COD/PHS/BIS",
+   "effects": [
+    {
+     "change": "none",
+     "how": "no Q1 metric reads it; Q3 inter-signal consistency adds its entry"
+    }
+   ],
+   "cite": "rinex302.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:MARKER TYPE",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: DELTA X/Y/Z",
+   "effects": [
+    {
+     "change": "provenance",
+     "how": "Q6 metadata checks add their entry"
+    }
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: PHASECENTER",
+   "effects": [
+    {
+     "change": "provenance",
+     "how": "Q6 adds its entry"
+    }
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: B.SIGHT XYZ",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: ZERODIR AZI",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:ANTENNA: ZERODIR XYZ",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:CENTER OF MASS: XYZ",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:DOI",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex_4.00.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:LICENSE OF USE",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex_4.00.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-not-representable:STATION INFORMATION",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex_4.00.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "header-field-not-representable:LEAP SECONDS",
+   "effects": [
+    {
+     "change": "none",
+     "how": "no Q1 metric reads it; Q2 time-scale conversions take leap seconds from the nav file or a table and add their entry"
+    }
+   ],
+   "cite": "rinex303.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "event-record-not-representable:*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.arcs",
+      "obs.time.gaps (satellite)"
+     ],
+     "how": "only if the dropped record changed a type list in the source: arcs that ended at that change may continue"
+    },
+    {
+     "change": "provenance",
+     "fields": [
+      "header timeline echo"
+     ]
+    }
+   ],
+   "cite": "rinex305.txt §5.3.2 p.37"
+  },
+  {
+   "kind": "obs",
+   "category": "event-record-deprecated:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "SYS / PHASE SHIFT and GLONASS COD/PHS/BIS in events: no Q1 metric reads them"
+    }
+   ],
+   "cite": "rinex_4.00.txt §5.2.12"
+  },
+  {
+   "kind": "obs",
+   "category": "event-emptied",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.arcs"
+     ],
+     "how": "as event-record-not-representable"
+    }
+   ],
+   "cite": "rinex305.txt Table A3 p.59-60"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-shift-record-not-representable",
+   "effects": [
+    {
+     "change": "none",
+     "how": "Q1 metrics do not read the alignment state; Q3 adds status changes to phase-alignment-unknown"
+    }
+   ],
+   "cite": "rinex301.txt §9.1; PLAN §3.3"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-shift-record-deprecated",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as above"
+    }
+   ],
+   "cite": "rinex_4.00.txt §5.2.12"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-shift-entry-dropped:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as above"
+    }
+   ],
+   "cite": "PLAN §3.3"
+  },
+  {
+   "kind": "obs",
+   "category": "epoch-precision",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.time.jitter",
+      "obs.clock.tag_jumps",
+      "obs.time.span"
+     ],
+     "bound_s": 1e-07,
+     "how": "the 4.02 picosecond digits are gone"
+    }
+   ],
+   "cite": "rinex_4.02.txt Table A3"
+  },
+  {
+   "kind": "obs",
+   "category": "clock-precision",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.clock.offset"
+     ],
+     "bound_s": 5e-10,
+     "how": "F15.12 rounded to F12.9"
+    }
+   ],
+   "cite": "rinex305.txt Table A3; rinex211.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "clock-overflow",
+   "effects": [
+    {
+     "change": "support",
+     "fields": [
+      "obs.clock.offset"
+     ],
+     "how": "offsets that do not fit are absent at those epochs"
+    }
+   ],
+   "cite": "F12.9 / F15.12 ranges"
+  },
+  {
+   "kind": "obs",
+   "category": "data-text-dropped",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "compliance.reader.repairs",
+      "compliance.validator.damage"
+     ],
+     "how": "--lenient only: both runs lenient; the dropped text is a source finding only"
+    }
+   ],
+   "cite": "PLAN §1 clause 9"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-unalign-precision:*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.clock.phase_jumps"
+     ],
+     "how": "--align-phases: each phase is shifted by a constant and rounded; epoch differences change by at most 1e-3 cycles",
+     "bound_cycles": 0.001
+    }
+   ],
+   "cite": "PLAN §3.3 rule 3"
+  },
+  {
+   "kind": "obs",
+   "category": "phase-align-precision:*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.clock.phase_jumps"
+     ],
+     "how": "as phase-unalign-precision",
+     "bound_cycles": 0.001
+    }
+   ],
+   "cite": "PLAN §3.3 rule 2"
+  },
+  {
+   "kind": "obs",
+   "category": "scale-factor-rounding:*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.snr.dist",
+      "obs.clock.code_jumps",
+      "obs.clock.phase_jumps"
+     ],
+     "how": "values divided by the factor and rounded to F14.3: each value within 0.0005 of its unit, an epoch difference within 0.001",
+     "bound_value": 0.0005,
+     "bound_difference": 0.001
+    },
+    {
+     "change": "support",
+     "fields": [
+      "obs.avail.observed",
+      "obs.avail.coverage",
+      "obs.arcs",
+      "obs.time.gaps (satellite)",
+      "obs.clock.*",
+      "obs.snr.*"
+     ],
+     "how": "a value whose quotient rounds to 0.000 becomes missing (comparison.reals rule 2): those observations leave the counts, exactly as many as the source has"
+    }
+   ],
+   "cite": "rinex305.txt §5.2.11 p.26"
+  },
+  {
+   "kind": "obs",
+   "category": "lli-bit2-meaning-differs",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.avail.flags: raw bit-2 counts (as, boc, undefined)"
+     ],
+     "how": "the converter clears bit 2 (unless --keep-lli-bit2): the source's count under its meaning becomes 0; the canonical counts do not change"
+    }
+   ],
+   "cite": "rinex211.txt Table A2; rinex300.txt p.30; rinex301.txt p.34"
+  },
+  {
+   "kind": "obs",
+   "category": "flags-on-missing-value-dropped",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.avail.flags: flags on missing values"
+     ],
+     "how": "become 0 for the dropped ones"
+    }
+   ],
+   "cite": "docs/HATANAKA.md (Compact RINEX 1.0)"
+  },
+  {
+   "kind": "obs",
+   "category": "sys-record-not-representable:*",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "applied-corrections note"
+     ]
+    }
+   ],
+   "cite": "rinex305.txt Table A2"
+  },
+  {
+   "kind": "obs",
+   "category": "antenna-phasecenter-code-not-representable:*",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex305.txt Table A2 p.53"
+  },
+  {
+   "kind": "obs",
+   "category": "header-record-foreign-dropped:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "a record the source version does not define: a compliance finding of the source only (always_differ)"
+    }
+   ],
+   "cite": "rinex211.txt Table A1"
+  },
+  {
+   "kind": "obs",
+   "category": "event-record-foreign-dropped:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as header-record-foreign-dropped"
+    }
+   ],
+   "cite": "rinex211.txt Table A2"
+  },
+  {
+   "kind": "nav",
+   "category": "system-not-representable:*",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "every per-scope entry of the removed system"
+     ]
+    },
+    {
+     "change": "value",
+     "fields": [
+      "nav.msg_types"
+     ],
+     "how": "without the system"
+    }
+   ],
+   "cite": "allowed_losses.json nav_systems"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-message-not-representable:*",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "records of that message"
+     ]
+    },
+    {
+     "change": "value",
+     "fields": [
+      "nav.coverage",
+      "nav.gaps",
+      "nav.msg_types",
+      "nav.duplicates"
+     ],
+     "how": "recomputed without those records"
+    }
+   ],
+   "cite": "rinex_4.02.txt §5.4"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-subtype-not-representable:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "record subtypes (ION areas): no Q1 metric; Q4 adds its entry"
+    }
+   ],
+   "cite": "rinex_4.02.txt Table 25 p.40"
+  },
+  {
+   "kind": "nav",
+   "category": "glonass-nav-line5-dropped",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "nav.health, nav.ranges fields of GLONASS orbit line 5 (status flags, group delay difference, URAI, health flags)"
+     ]
+    }
+   ],
+   "cite": "rinex305.txt Table A10"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-field-not-representable:*",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "nav.ranges / nav.health entries for those fields"
+     ]
+    }
+   ],
+   "cite": "allowed_losses.json rule"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-field-not-representable:S:SBAS:IODN",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "nav.iod for SBAS IODN"
+     ]
+    }
+   ],
+   "cite": "rinex211.txt Table A16 l.1976"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-field-not-representable:J:LNAV:L2P-flag",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "nav.ranges entry of the QZSS L2P flag"
+     ]
+    }
+   ],
+   "cite": "rinex303.txt Table A12 p.80"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-spare-value-dropped:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "QC reads no spare field"
+    }
+   ],
+   "cite": "allowed_losses.json rule"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-epoch-precision",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "nav.times",
+      "nav.duplicates",
+      "nav.coverage"
+     ],
+     "how": "fractional Toc seconds of RINEX 2 (F5.1) are not in I2: Toc changes by less than 1 s; records whose Toc then coincide may become duplicates",
+     "bound_s": 1.0
+    }
+   ],
+   "cite": "allowed_losses.json rule: v2 epoch seconds F5.1, v3/v4 I2"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-duplicate-removed",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "nav.duplicates"
+     ],
+     "how": "--dedupe: the identical duplicates the loss counts are gone"
+    }
+   ],
+   "cite": "PLAN §3.5"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-correction-precision:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "header corrections: no Q1 metric; Q4 (SPP ionosphere and time) adds its entry"
+    }
+   ],
+   "cite": "rinex211.txt Table A3; rinex305.txt Table A5"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-correction-not-representable:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as nav-correction-precision"
+    }
+   ],
+   "cite": "allowed_losses.json rule"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-correction-extra:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as nav-correction-precision"
+    }
+   ],
+   "cite": "rinex305.txt Table A5"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-ion-area-not-representable:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as nav-correction-precision"
+    }
+   ],
+   "cite": "rinex_4.00.txt Table A32"
+  },
+  {
+   "kind": "nav",
+   "category": "nav-sto-system-not-representable:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "STO records: no Q1 metric"
+    }
+   ],
+   "cite": "rinex_4.00.txt Table A30"
+  },
+  {
+   "kind": "nav",
+   "category": "header-field-not-representable:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "header fields: no Q1 metric"
+    }
+   ],
+   "cite": "allowed_losses.json rule"
+  },
+  {
+   "kind": "nav",
+   "category": "header-record-not-representable:*",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex_4.02.txt Table A7"
+  },
+  {
+   "kind": "nav",
+   "category": "merge-header-record-dropped:*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "--merge is out of scope (comparison.out_of_scope)"
+    }
+   ],
+   "cite": "rinex_4.02.txt Table A7"
+  },
+  {
+   "kind": "met",
+   "category": "met-type-not-representable:*",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "met.ranges, met.jumps entries of the type"
+     ]
+    },
+    {
+     "change": "value",
+     "fields": [
+      "met.sensors"
+     ],
+     "how": "the type and its sensor are gone"
+    }
+   ],
+   "cite": "rinex211.txt §10.3"
+  },
+  {
+   "kind": "met",
+   "category": "header-record-not-representable:SENSOR*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "met.sensors"
+     ],
+     "how": "sensor records of removed types are gone"
+    }
+   ],
+   "cite": "rinex211.txt §10.3"
+  },
+  {
+   "kind": "met",
+   "category": "header-record-not-representable:DOI",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex_4.02.txt Table A42"
+  },
+  {
+   "kind": "met",
+   "category": "header-record-not-representable:LICENSE OF USE",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex_4.02.txt Table A42"
+  },
+  {
+   "kind": "met",
+   "category": "header-record-not-representable:STATION INFORMATION",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ],
+   "cite": "rinex_4.02.txt Table A42"
+  }
+ ],
+ "repair": [
+  {
+   "rule": "HDR.BLANKLINE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "a source compliance finding only (always_differ)"
+    }
+   ]
+  },
+  {
+   "rule": "OBS.BLANKLINE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as HDR.BLANKLINE"
+    }
+   ]
+  },
+  {
+   "rule": "NAV.BLANKLINE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as HDR.BLANKLINE"
+    }
+   ]
+  },
+  {
+   "rule": "MET.BLANKLINE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as HDR.BLANKLINE"
+    }
+   ]
+  },
+  {
+   "rule": "OBS.TRUNCATED",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "compliance.reader.repairs"
+     ],
+     "how": "--lenient: both runs use the lenient reader (comparison.inputs), so lenient_read is true in both; the source's compliance.reader.repairs lists this repair and the target's does not; values are equal"
+    }
+   ]
+  },
+  {
+   "rule": "OBS.DATA.SKIPPED-TEXT",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "compliance.reader.repairs"
+     ],
+     "how": "--lenient: both runs use the lenient reader (comparison.inputs), so lenient_read is true in both; the source's compliance.reader.repairs lists this repair and the target's does not; values are equal"
+    }
+   ]
+  },
+  {
+   "rule": "NAV.V4.DRAFT-HEADER",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "compliance.reader.repairs"
+     ],
+     "how": "--lenient: both runs use the lenient reader (comparison.inputs), so lenient_read is true in both; the source's compliance.reader.repairs lists this repair and the target's does not; values are equal"
+    }
+   ]
+  },
+  {
+   "rule": "MET.DATA.COLUMNS",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "compliance.reader.repairs"
+     ],
+     "how": "--lenient: both runs use the lenient reader (comparison.inputs), so lenient_read is true in both; the source's compliance.reader.repairs lists this repair and the target's does not; values are equal"
+    }
+   ]
+  },
+  {
+   "rule": "MET.EPOCH.V2LAYOUT",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "compliance.reader.repairs"
+     ],
+     "how": "--lenient: both runs use the lenient reader (comparison.inputs), so lenient_read is true in both; the source's compliance.reader.repairs lists this repair and the target's does not; values are equal"
+    }
+   ]
+  },
+  {
+   "rule": "HDR.PGM.ADDED",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ]
+  },
+  {
+   "rule": "OBS.BDS-B1I-BAND",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the adapter normalises band digits: the canonical key is the same; only the 'code' scope field changes (provenance)"
+    }
+   ]
+  },
+  {
+   "rule": "HDR.PHASESHIFT.LABEL",
+   "effects": [
+    {
+     "change": "none",
+     "how": "Q1 does not read the alignment state; Q3 adds its entry"
+    }
+   ]
+  },
+  {
+   "rule": "HDR.PHASESHIFT.EMPTY",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as HDR.PHASESHIFT.LABEL"
+    }
+   ]
+  },
+  {
+   "rule": "HDR.PHASESHIFT.CODE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as HDR.PHASESHIFT.LABEL"
+    }
+   ]
+  },
+  {
+   "rule": "HDR.COUNTS",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.header.counts"
+     ],
+     "how": "the source's mismatch finding is gone: the target's counts agree with its data"
+    }
+   ]
+  },
+  {
+   "rule": "HDR.TIME-SYSTEM",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.time.span: time-system source"
+     ],
+     "how": "an unreadable label is replaced by the default the report's time-system assumption names; epochs unchanged"
+    }
+   ]
+  },
+  {
+   "rule": "HDR.TIME-OF-FIRST-OBS",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.header.first_last"
+     ],
+     "how": "the source's difference becomes 0"
+    }
+   ]
+  },
+  {
+   "rule": "HDR.TIME-OF-LAST-OBS",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.header.first_last"
+     ],
+     "how": "the source's difference becomes 0"
+    }
+   ]
+  },
+  {
+   "rule": "HDR.INTERVAL",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.header.interval: declared, agree"
+     ],
+     "how": "declared becomes the measured spacing, or absent if unreadable; the delta QC uses does not change (it used the inferred one when they disagreed)"
+    },
+    {
+     "change": "status",
+     "fields": [
+      "obs.header.interval"
+     ],
+     "from": "ok",
+     "to": "not-applicable(no-record)",
+     "how": "only when the unreadable INTERVAL is dropped"
+    }
+   ]
+  },
+  {
+   "rule": "NAV.GLO.TK-DAY-BASIS",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "nav.glo_tk_basis",
+      "nav.times (GLONASS)"
+     ],
+     "how": "a converter repair under --lenient (navconv), not a reader note: the source reports the day basis, the target the week basis; GLONASS transmission-time findings may change where the source's day-basis values were read on the week basis"
+    }
+   ]
+  },
+  {
+   "rule": "NAV.STO.SATELLITE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "STO header data: no Q1 metric"
+    }
+   ]
+  },
+  {
+   "rule": "NAV.HDR.UTC-WEEK",
+   "effects": [
+    {
+     "change": "none",
+     "how": "header corrections: no Q1 metric"
+    }
+   ]
+  },
+  {
+   "rule": "NAV.HDR.BDS-WEEK",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as NAV.HDR.UTC-WEEK"
+    }
+   ]
+  },
+  {
+   "rule": "NAV.HDR.IONCORR.LAYOUT",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as NAV.HDR.UTC-WEEK"
+    }
+   ]
+  },
+  {
+   "rule": "NAV.HDR.TIMECORR.LAYOUT",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as NAV.HDR.UTC-WEEK"
+    }
+   ]
+  },
+  {
+   "rule": "NAV.HDR.FOREIGN-LABEL",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as NAV.HDR.UTC-WEEK"
+    }
+   ]
+  }
+ ],
+ "normalisation": [
+  {
+   "name": "obs-code-collapsed-empty:*",
+   "effects": [
+    {
+     "change": "absent",
+     "fields": [
+      "per-scope entries of the empty code (observed count 0 in the source)"
+     ]
+    },
+    {
+     "change": "value",
+     "fields": [
+      "obs.header.blank_types"
+     ],
+     "how": "the always-blank type is gone"
+    }
+   ]
+  },
+  {
+   "name": "missing-zero-written-blank",
+   "effects": [
+    {
+     "change": "none",
+     "how": "0.0 and blank are both missing (QC_METRICS §1 row 1)"
+    }
+   ]
+  },
+  {
+   "name": "phase-shift-applied:*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.clock.phase_jumps"
+     ],
+     "how": "a constant shift per signal cancels in epoch differences; bounds of phase-align-precision"
+    }
+   ]
+  },
+  {
+   "name": "phase-shift-removed:*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.clock.phase_jumps"
+     ],
+     "how": "as phase-shift-applied"
+    }
+   ]
+  },
+  {
+   "name": "phase-shift-clipped:*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.avail.flags: lost-lock, raw bit-0 count, overflow-clip-candidate"
+     ],
+     "how": "the test computes the expected change from the two files, not from the normalisation's count: lost-lock and the raw bit-0 count rise by the clipped observations whose source LLI had no bit 0; overflow-clip-candidate by the clipped observations that meet its predicate (a first-epoch clip has no preceding difference and is not a candidate)"
+    },
+    {
+     "change": "support",
+     "fields": [
+      "obs.clock.phase_jumps"
+     ],
+     "how": "clipped epochs leave test T2"
+    }
+   ]
+  },
+  {
+   "name": "prn-counts-omitted-overflow",
+   "effects": [
+    {
+     "change": "status",
+     "fields": [
+      "obs.header.counts"
+     ],
+     "from": "ok",
+     "to": "not-applicable(no-record)"
+    }
+   ]
+  }
+ ],
+ "assumption": [
+  {
+   "category": "obs-code-attribute:*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "scope keys"
+     ],
+     "how": "the source key '<sys>:<v2 code>' (e.g. 'G:C2', 'G:P2') matches the target key '<sys>:<v3 code>' named by the assumption's detail ('C2->C2X', 'P2->C2W'); values equal"
+    },
+    {
+     "change": "status",
+     "fields": [
+      "per-scope entries of the signal"
+     ],
+     "from": "degraded(attribute-unknown)",
+     "to": "ok",
+     "how": "only for metrics that need the attribute (Q3); Q1 metrics are ok in both"
+    }
+   ]
+  },
+  {
+   "category": "time-system",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.time.span: time-system label and source"
+     ],
+     "how": "a default or a relabel (QZS, IRN, GAL to GPS: aligned with GPS time to tens of ns); epochs unchanged"
+    }
+   ]
+  },
+  {
+   "category": "phase-alignment",
+   "effects": [
+    {
+     "change": "none",
+     "how": "Q1 does not read the alignment state; Q3 adds status changes (phase-alignment-unknown to ok)"
+    }
+   ]
+  },
+  {
+   "category": "glonass-fcn",
+   "effects": [
+    {
+     "change": "status",
+     "fields": [
+      "per-scope GLONASS FDMA entries"
+     ],
+     "from": "cannot-compute(no-channel)",
+     "to": "ok",
+     "how": "only if the source run lacked the companion the conversion used; the comparison gives both runs the same inputs, so normally nothing changes"
+    }
+   ]
+  },
+  {
+   "category": "glonass-cod-phs-bis",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "category": "approx-position",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.header.position"
+     ],
+     "how": "the user's position, or zero (a zero is a finding)"
+    }
+   ]
+  },
+  {
+   "category": "filename-data-source",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ]
+  },
+  {
+   "category": "filename-id",
+   "effects": [
+    {
+     "change": "provenance",
+     "how": "the output name; converted files are never split members (QC_METRICS §8)"
+    }
+   ]
+  },
+  {
+   "category": "leap-seconds-basis",
+   "effects": [
+    {
+     "change": "none",
+     "how": "nav header; no Q1 metric"
+    }
+   ]
+  },
+  {
+   "category": "leap-seconds",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as leap-seconds-basis"
+    }
+   ]
+  },
+  {
+   "category": "galileo-message-type",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "nav.msg_types (Galileo)"
+     ],
+     "how": "QC derives a RINEX 3 Galileo record's kind (INAV or FNAV) from its data-source bits, as the converter does for the RINEX 4 message type: counts are equal where both read the bits the same way; a record whose bits name neither or both is 'unknown' in the source and the converter's choice in the target"
+    }
+   ]
+  },
+  {
+   "category": "glonass-nav-line5",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "nav.health, nav.ranges fields of GLONASS line 5"
+     ],
+     "how": "absent in the source, the spec's 'unknown' values in the target: QC reads them as unknown, so entries stay not-applicable"
+    }
+   ]
+  },
+  {
+   "category": "qzss-ion-area",
+   "effects": [
+    {
+     "change": "none",
+     "how": "ION records; no Q1 metric"
+    }
+   ]
+  },
+  {
+   "category": "glonass-frame-time-week",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the adapter normalises the frame-time basis (day in RINEX 2, week in 3.x/4.x)"
+    }
+   ]
+  },
+  {
+   "category": "glonass-nav-2.00-signs",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the adapter applies the 2.00 signs (-GammaN, +TauC) on reading"
+    }
+   ]
+  },
+  {
+   "category": "bds-week-basis",
+   "effects": [
+    {
+     "change": "none",
+     "how": "header corrections; no Q1 metric"
+    }
+   ]
+  },
+  {
+   "category": "ion-galileo-disturbance-flags",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "category": "sto-transmission-time",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "category": "sto-utc-id",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "category": "glonass-time-corr-week",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "category": "time-corr-reference",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "category": "ion-transmission-time",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  }
+ ],
+ "rule_or_warning": [
+  {
+   "name": "OBS.TIME-SYSTEM.BDT-TO-GPS",
+   "effects": [
+    {
+     "change": "time",
+     "shift_s": 14,
+     "fields": [
+      "epoch times",
+      "obs.time.span",
+      "obs.time.grid: median offset",
+      "event epochs"
+     ],
+     "how": "a BDT file written to a version without BDT is shifted to GPS time"
+    }
+   ]
+  },
+  {
+   "name": "LEAP.BDT-TO-GPS",
+   "effects": [
+    {
+     "change": "none",
+     "how": "nav header"
+    }
+   ]
+  },
+  {
+   "name": "OBS.INTERVAL.FROM-KEPT-EPOCHS",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.header.interval: declared"
+     ],
+     "how": "epochs left out (a claimed loss) changed the spacing"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V2V3.WAVELENGTH-TO-LLI",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.avail.flags: raw bit-1 counts (opposite-wavelength-factor in the source, half-cycle in the target)"
+     ],
+     "how": "v3 bit 1 = v2 bit 1 XOR (factor == 2); the canonical half-cycle count is unchanged"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V2V3.WAVELENGTH-EVENT-TO-LLI",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "obs.avail.flags: raw bit-1 counts"
+     ],
+     "how": "as OBS.V2V3.WAVELENGTH-TO-LLI, for factors set in events"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V2V3.WAVELENGTH-RECORD-DROPPED",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the factor is carried by LLI bit 1"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V3V2.WAVELENGTH-DEFAULT",
+   "effects": [
+    {
+     "change": "none",
+     "how": "a default factor 1 1 is written; bit 1 is carried, so the canonical half-cycle count is unchanged"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V3V2.SCALE-APPLIED",
+   "effects": [
+    {
+     "change": "none",
+     "how": "values divided by the factor; rounding is the scale-factor-rounding loss"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V3V2.EVENT-SCALE-APPLIED",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as OBS.V3V2.SCALE-APPLIED"
+    }
+   ]
+  },
+  {
+   "name": "OBS.GLONASS-SLOTS-FROM-EVENTS",
+   "effects": [
+    {
+     "change": "support",
+     "fields": [
+      "GLONASS FDMA entries before the event epoch"
+     ],
+     "how": "channels the source gave only in a later event are in the target's header: phase tests may use those satellites from the start (support may increase)"
+    }
+   ]
+  },
+  {
+   "name": "OBS.GLONASS-SLOTS-INCOMPLETE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "a warning; the channels QC can use are the same"
+    }
+   ]
+  },
+  {
+   "name": "OBS.CLOCK.NOT-F12.9",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V2V3.CODEMAP.*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "scope keys"
+     ],
+     "how": "matched by comparison.signals with the obs-code-attribute assumption"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V3V2.CODEMAP.*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "scope keys"
+     ],
+     "how": "the source's 'G:C1C' is the target's 'G:C1' (comparison.signals, rinexconv.codemap.v3_to_v2); values equal"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V3V2.COLLAPSE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the loss obs-code-collapsed carries the effect"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V2V3.OBS-SCALE-FACTOR",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the adapter divides by the RINEX 2.20 OBS SCALE FACTOR ([P7]) and by SYS / SCALE FACTOR, so values are equal"
+    }
+   ]
+  },
+  {
+   "name": "OBS.SCALE-FACTOR.REMAPPED",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the factor moves with its values; the adapter divides by it"
+    }
+   ]
+  },
+  {
+   "name": "OBS.DROP-SYSTEM.*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the losses system-not-representable / system-removed-unresolvable carry the effect"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V3V2.DROP-SYSTEM.*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as OBS.DROP-SYSTEM.*"
+    }
+   ]
+  },
+  {
+   "name": "OBS.DUPLICATE-CODE-KEPT",
+   "effects": [
+    {
+     "change": "none",
+     "how": "both columns are kept, the second as '#2' in both runs"
+    }
+   ]
+  },
+  {
+   "name": "OBS.NONSTANDARD-CODE",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.NONSTANDARD-CODE-CARRIED",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.HDR.NONSTANDARD-CARRIED",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.EVENT.NONSTANDARD-CARRIED",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.HDR.TYPES-FROM-FIRST-DATA-LIST",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the header type list is taken from the first data list; the timeline QC applies is the same"
+    }
+   ]
+  },
+  {
+   "name": "OBS.TIME-SYSTEM.NAME-DATE",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASE.ALIGN-*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "--align-phases: the normalisations phase-shift-applied/removed carry the effect"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASE.ALIGN-CLIPPED",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the normalisation phase-shift-clipped carries the effect"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASE.UNALIGN-3.00",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as OBS.PHASE.ALIGN-*"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASE.UNALIGN-SCALE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as OBS.PHASE.ALIGN-*"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASESHIFT.NO-PHASE-TYPES",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASESHIFT.REFERENCE-ONLY-TO-301",
+   "effects": [
+    {
+     "change": "none",
+     "how": "alignment state: Q3 adds its entry"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASESHIFT.NONSTANDARD",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASE-UNKNOWN",
+   "effects": [
+    {
+     "change": "none",
+     "how": "alignment state: Q3 adds its entry"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASE.ALIGN-NOTHING-TO-DO",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASE.ALIGN-NOTHING-TO-UNDO",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PHASE.ALIGN-NO-COLUMN",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "OBS.V4V3.PHASE-ZERO-FORM",
+   "effects": [
+    {
+     "change": "none",
+     "how": "alignment state: Q3 adds its entry"
+    }
+   ]
+  },
+  {
+   "name": "OBS.PRN-COUNT-OVERFLOW",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the normalisation prn-counts-omitted-overflow carries the effect"
+    }
+   ]
+  },
+  {
+   "name": "OBS.APPROX-POSITION-ZERO",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the assumption approx-position carries the effect"
+    }
+   ]
+  },
+  {
+   "name": "OBS.CRX1.EVENT-PLAIN",
+   "effects": [
+    {
+     "change": "none",
+     "how": "Hatanaka output layout; QC reads the decoded RINEX"
+    }
+   ]
+  },
+  {
+   "name": "OBS.CRX.*-PLAIN",
+   "effects": [
+    {
+     "change": "none",
+     "how": "as OBS.CRX1.EVENT-PLAIN"
+    }
+   ]
+  },
+  {
+   "name": "VAL.INPUT-DAMAGE",
+   "effects": [
+    {
+     "change": "provenance",
+     "fields": [
+      "compliance.validator.damage"
+     ],
+     "how": "--lenient: the source's damage findings; the target has none"
+    }
+   ]
+  },
+  {
+   "name": "VAL.INHERITED",
+   "effects": [
+    {
+     "change": "none",
+     "how": "see always_differ (compliance)"
+    }
+   ]
+  },
+  {
+   "name": "HDR.PGM.SECOND-LINE",
+   "effects": [
+    {
+     "change": "provenance"
+    }
+   ]
+  },
+  {
+   "name": "NAV.V3V4.MSGTYPE.*",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "nav.msg_types"
+     ],
+     "how": "the RINEX 3 record kind becomes the RINEX 4 message type it names; counts per kind equal, apart from Galileo records whose kind is unknown in the source (assumption galileo-message-type)"
+    }
+   ]
+  },
+  {
+   "name": "NAV.V4V3.EPH",
+   "effects": [
+    {
+     "change": "value",
+     "fields": [
+      "nav.msg_types"
+     ],
+     "how": "the RINEX 4 message type becomes the RINEX 3 record kind; counts equal; messages with no RINEX 3 form are the loss nav-message-not-representable"
+    }
+   ]
+  },
+  {
+   "name": "NAV.GLO.FRAME-TIME-BASIS",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the adapter normalises the frame-time basis"
+    }
+   ]
+  },
+  {
+   "name": "NAV.GLO.V2.00-SIGNS",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the adapter applies the 2.00 signs"
+    }
+   ]
+  },
+  {
+   "name": "NAV.GLO.LINE5-FILLED",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the assumption glonass-nav-line5 carries the effect"
+    }
+   ]
+  },
+  {
+   "name": "NAV.GLO.LINE5-DROPPED",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the loss glonass-nav-line5-dropped carries the effect"
+    }
+   ]
+  },
+  {
+   "name": "NAV.GLO.LINE5-DEFAULT-DROPPED",
+   "effects": [
+    {
+     "change": "none",
+     "how": "a line 5 holding only the spec's unknown values: nothing to read"
+    }
+   ]
+  },
+  {
+   "name": "NAV.DEDUPE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "the loss nav-duplicate-removed carries the effect"
+    }
+   ]
+  },
+  {
+   "name": "NAV.MERGE",
+   "effects": [
+    {
+     "change": "none",
+     "how": "--merge is out of scope"
+    }
+   ]
+  },
+  {
+   "name": "NAV.MERGE.COUNT",
+   "effects": [
+    {
+     "change": "none",
+     "how": "--merge is out of scope"
+    }
+   ]
+  },
+  {
+   "name": "NAV.FRAME-TIME.RANGE",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.STO.UTC-ID-CONFLICT",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.STO.UTC-ID",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.CORR.CHOOSE-FIRST.*",
+   "effects": [
+    {
+     "change": "none",
+     "how": "header corrections: no Q1 metric"
+    }
+   ]
+  },
+  {
+   "name": "NAV.HDR.BDS-WEEK-BASIS",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.HDR.NONSTANDARD-CARRIED",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.ION.REGION-TO-SUBTYPE",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.ION.SUBTYPE-TO-REGION",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.V2V3.ION",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.V3V3.GPGA-GAGP",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.V3V4.HEADER-ION-TO-RECORD",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.V3V4.HEADER-STO-TO-RECORD",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.V4V3.ION-TO-HEADER",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "NAV.V4V3.STO-TO-HEADER",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "LEAP.BEIDOU-ID-SPELLING",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "LEAP.GPS-TO-BDS",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "LEAP.UNKNOWN-ZERO-BLANK",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "MET.YEAR-DIGITS",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  },
+  {
+   "name": "MET.HDR.NONSTANDARD-CARRIED",
+   "effects": [
+    {
+     "change": "none"
+    }
+   ]
+  }
+ ],
+ "derived_rules": {
+  "_doc": "Two adapter rules that make metrics invariant where raw fields change (docs/QC_METRICS.md §1.2 and §4.1)",
+  "half-cycle": "obs.avail.flags counts a canonical half-cycle observation as: RINEX 2, a GPS L1/L2 phase whose effective wavelength factor that epoch is 2 (the header or event factor, flipped by LLI bit 1), and any other phase with LLI bit 1 ([P8], an interpretation: rinexconv copies bit 1 there verbatim); RINEX 3/4, a phase with LLI bit 1. The raw bit-1 counts are reported beside it.",
+  "overflow-clip": "overflow-clip-candidate: LLI bit 0 and a phase change of 1e9 cycles to within 1e7 cycles; a subset of lost-lock, which keeps counting it (QC_METRICS §1.2)."
+ },
+ "rule_or_warning_doc": "Every rule and warning name the converter records (rinexconv/*.py, rinexcore/*.py: .rule() and .warn() calls, listed 2026-11-06), '*' for a name built from values. Most carry no effect of their own; they are listed so that the Q1 test can fail on a name that is not here. A name listed under repair (NAV.GLO.TK-DAY-BASIS, NAV.HDR.TIMECORR.LAYOUT) also covers its use as a warning. The validator's own finding names (VAL.*) are not report entries: they fall under always_differ (compliance)."
+}

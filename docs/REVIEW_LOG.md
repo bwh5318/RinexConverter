@@ -239,3 +239,22 @@ Sonnet 8 and Astra 7, with revision 3 never re-scored.
 
 Round 3's items were fixed after the round (the user's limit was three rounds), and have not been
 re-scored. Open for the user: decisions D1-D5 in PLAN.md §5.10.
+
+## rinexqc Q0a documents — Opus and Codex Sol 6.1 (high), 2026-11-06
+
+Reviewed: docs/QC_METRICS.md v0, docs/QC_SCHEMA.md v0, tests/expectations/qc_invariance.json v0, the Q0a
+entry of docs/DECISIONS.md and PLAN.md §5.10. One Opus reviewer and one Codex reviewer, the user's usual
+choice; no target score (review, one fix pass, one verify round).
+
+| Round | Opus | Sol | What it found |
+|---|---|---|---|
+| 1 | 6 | 6 | Both: the clock classifier contradicted its tests (a code-and-phase step cancels in code minus phase); edge gaps unobservable and the arc definition circular; RINEX 2 C1/P1 and C2/P2 shared a signal key and RINEX 3→2 conversions could not be matched; the reader reads past damage the converter refuses by validation; `lenient_read` had three meanings; several Q1 outputs had no correctness gate; 2.10 has no band 5. Opus: an unmeetable SNR gate; half-cycle count broken for non-GPS RINEX 2 phases; the RINEX 2.20 OBS SCALE FACTOR; nav message-type rules missing; header counts. Sol: scale-factor rounding to zero; trial independence |
+| 2 (verify) | 8, no blocking | 7 | Opus: polish only (synthetic SNR noise unstated; E7 off by one epoch; wording). Sol: one clock step gave two events (T3's two lobes, the cubic ringing); trials clustered by copy, not by source file; E7 off by one (also Opus); detector medians over different satellites after a removal; clip counts assumed |
+
+All items of both rounds were checked against the code and the specs, and fixed: round 1 by rewriting
+QC_METRICS.md; round 2 by edits (T3 lobe pairing and step removal from later fits, clustering by source
+file with a fixed seed, the arc rule and gate E7 stated by the spacing (N + 1)·Δ, the invariance test's
+source run restricted with `--select` to what the target holds, clip counts computed from the two files,
+the synthetic SNR noise stated). The round-2 fixes have not been re-scored. Codex usage at the end:
+5-hour 28%, weekly 7%. Open for the user: sign-off of Q1's gates and proposals [P1]-[P8]; decision D6
+(the ICD texts).

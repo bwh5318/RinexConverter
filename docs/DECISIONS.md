@@ -3,6 +3,97 @@
 Newest first. Each entry says what was decided, why, and whether the user still has to
 confirm it. "Verified" means checked by a test or a corpus run; "assumed" means not yet.
 
+## 2026-11-06 — rinexqc Q0a: decisions D1-D5, QC documents v0
+
+**The user's decisions** (put one question each, the plan's proposal recommended; PLAN §5.10 now
+records them). Confirmed by the user:
+- **D1** damaged files: compliance findings only; `--lenient` reads them, each metric with its own
+  status and a `lenient_read` flag.
+- **D2** downloads from files.igs.org (`igs20.atx`, `rcvr_ant.tab`, the satellite metadata SINEX,
+  site logs) and of Anubis and RTKLIB: fetched once each in Q0b, pinned (URL, version, date, sha256).
+- **D3** Galileo single-frequency SPP: Klobuchar as a reported approximation; NeQuick-G only if asked.
+- **D4** grading profile: drafted at Q5, approved by the user; no grade before then.
+- **D5** SNR units: relative unless the header says `DBHZ` or the user's receiver table lists the
+  receiver. Context given with the question: 55 of the 185 RINEX 3/4 corpus obs files have no
+  `SIGNAL STRENGTH UNIT` (mostly JAVAD TRE_*, Trimble NetR9/Alloy, Leica GR50); RINEX 2 cannot state
+  one, and 79 of the 120 RINEX 2 files have S observations.
+
+**Written** (documents only, no rinexqc code):
+- `docs/QC_METRICS.md` v0: the semantics table (20 rows, each checked against `specs/text/` and cited
+  by PDF page or RINEX 2 line), the frequency and pair table (checked against rinex_4.02.txt Tables
+  10-16, pp.30-35, with the version each band appears in from the tested `rinexcore/spec/obscodes.py`),
+  the metric catalogue with units, scopes, arc resets, cadence limits and inputs, the input matrix,
+  the threshold set `qc-thresholds/0`, Q1's numeric gates (exact gates E1-E15, statistical gates for
+  clock steps and SNR drops, expected outcomes for corrupt files) and the station split rule.
+- `docs/QC_SCHEMA.md` v0 (`rinexqc-result/0`): the metric record of PLAN §5.1 (value or null, unit,
+  support with exclusions, status with a reason from a closed list, method, threshold set and commit,
+  inputs by id resolving to name and sha256), `lenient_read` per metric and at the top level.
+- `tests/expectations/qc_invariance.json` v0: for every loss rule of `allowed_losses.json` (all 65),
+  every repair, normalisation and assumption the converter records, and every rule and warning name
+  it records (the first draft missed `OBS.V3V2.CODEMAP.*`, `OBS.V2V3.OBS-SCALE-FACTOR`,
+  `NAV.V3V4.MSGTYPE.*` and `NAV.V4V3.EPH`; the review found them, and a script then checked every
+  `.rule()`/`.warn()` name in rinexconv and rinexcore against the file), which QC fields may change and
+  how. A name not in the file fails the Q1 test, so a new converter category needs an entry first.
+
+**Review round 1** (Opus 6/10, Codex Sol 6.1 high 6/10; docs/REVIEW_LOG.md). Both found the same six
+problems, all checked and fixed: the clock classifier contradicted its own tests (a code-and-phase step
+cancels in code minus phase; now three tests, T1 code minus phase, T2 phase, T3 millisecond, with
+one-sided noise windows, defined floors and worked examples); edge gaps were unobservable (the
+evaluation interval starts at the first epoch; the gate now states the outcome per placement, and the
+arc definition is no longer circular); RINEX 2 C1/P1 and C2/P2 shared one signal key, and RINEX 3→2
+conversions could not be matched (keys are now `<system>:<code>`, matched through the report's
+assumptions and `OBS.V3V2.CODEMAP` rules); the reader reads past some damage the converter refuses by
+validation (proposal [P6]); `lenient_read` had three meanings (now one: the run used `--lenient`);
+several Q1 outputs had no correctness gate (E1 now covers every deterministic output against the
+independent checker, E5 adds known-answer fixtures). Also fixed: an unmeetable SNR gate (6 dB under an
+8 dB threshold), SNR reference window now trailing; the half-cycle count for non-GPS RINEX 2 phases
+([P8]); the RINEX 2.20 `OBS SCALE FACTOR` ([P7]); scale-factor rounding to zero; trial independence
+(cluster bootstrap); 2.10 has no band 5; the 4.02 slot record's −7…+6 range; header counts as the
+converter counts them (satellites from flags 0, 1 and 6).
+
+**Verify round** (Opus 8/10, no blocking; Sol 7/10). Fixed after it, not re-scored: one clock step now
+gives one event (T3's two lobes paired; a found step removed from later fits and noise windows); "no
+jumps" needs T1 and T2 testability; trials are clustered by source file, not by copy (bootstrap seed
+fixed); the arc rule and gate E7 are stated by the spacing (N + 1)·Δ against G_arc, boundary included;
+the invariance test runs the source restricted (`--select`) to the systems and signals the target holds,
+so detector medians use the same satellites; clip counts are computed from the two files; the synthetic
+SNR noise is stated (σ = 1 dB-Hz) with a rate bound.
+
+**Corrections to PLAN rev. 4 found in the check** (QC_METRICS.md §1.3; PLAN §5.1, §5.2 and §5.6 are
+left as they are until the user approves the change, since Q0a edits only §5.10):
+- §5.1 item 4's example is wrong: rinexconv maps a RINEX 2 GPS C2 to **C2X**, P2 to C2W
+  (`rinexconv/codemap.py:26-30`), not C2 to C2W. Verified in the code.
+- Page citations: Tables 10-16 are pp.30-35 and §4.1.2 is p.16 in the project's convention (PDF page
+  markers); the plan gave the printed numbers. The event-flag source is §5.3.2 p.37 and Table A3, not
+  §6.5.
+- Rows added that the plan lacked: which observations carry an LLI (phase only in 3/4; bits 0-1 phase
+  only in 2), the validity of header values, phase overflow clipping, the BeiDou band digits by
+  version, the 2.10/2.11 time-system difference and the GEO default; and 3.01-3.04 word LLI bit 2 as
+  "Galileo BOC-tracking".
+
+**Proposals in the documents for the user's sign-off:** the Q1 gates (QC_METRICS §7) and [P1]-[P8]:
+non-standard RINEX 2 systems read with RINEX 3 band meanings and `degraded`; availability arcs broken
+at max(300 s, 10·Δ); flag 1 (power failure) also ends arcs; a 10° default mask; the met range and jump
+limits (no external source: plausibility limits); "refused" to include the validator's data-damage
+findings, as rinexconv refuses them (the rule set moves to rinexcore in Q0b); the RINEX 2.20
+`OBS SCALE FACTOR` applied; RINEX 2 LLI bit 1 on non-GPS-L1/L2 phases read as half-cycle.
+
+**New decision D6:** the ICD texts that nav QC, healthy-nav completeness and SISRE must cite are not in
+`specs/`; fetching them is a download outside CDDIS and BKG.
+
+**The user's sign-off, 2026-11-06, after the review** (one question each, the recommendation first):
+- **Q1's gates (QC_METRICS §7): signed off as written.** Frozen with the commit that records them;
+  changing one needs the user's sign-off again. The tuned thresholds of §6 are tuned in Q1.
+- **[P6]: yes**, rinexqc refuses read-past damage as rinexconv does (the reader's `CorruptError` or a
+  validator data-damage finding; the rule set moves from rinexconv/engine.py into rinexcore in Q0b).
+- **D6: fetch each ICD once, pinned** (URL, version, date, sha256), into a new gitignored folder, in Q0b.
+- **[P1]-[P5], [P7], [P8]: accepted as written.**
+
+**Two adapter rules chosen so that metrics stay invariant** where the converter changes raw fields: a
+canonical `half-cycle` count (RINEX 2: effective wavelength factor 2 on GPS L1/L2, LLI bit 1 on other
+phases; RINEX 3/4: LLI bit 1), which the converter's `v3 bit 1 = v2 bit 1 XOR (factor == 2)` rule
+preserves; and `overflow-clip-candidate`, a subset of `lost-lock` (a resemblance to a clip is not proof).
+
 ## 2026-11-06 — rinexqc plan, revision 4
 
 The user asked for the QC plan to be re-reviewed by Codex Sol 6.1 (xhigh) and an Opus agent, up to three
