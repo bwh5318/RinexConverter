@@ -8,8 +8,10 @@ Two tools that share one RINEX core:
    and writes a JSON result, an offline HTML report and a short text summary.
 
 The guide for the Claude that builds this is [CLAUDE.md](CLAUDE.md). This file is the plan.
-Revision 3 (2026-10-30) takes in three review rounds by Sonnet and Codex Astra; scores
-and changes are in `docs/REVIEW_LOG.md`. Every factual correction from those reviews was
+Revision 3 (2026-10-30) took in three review rounds by Sonnet and Codex Astra. Revision 4
+(2026-11-06) rewrites the QC plan (§3.9, §5, §6, the Q milestones) after a review by Codex
+Sol 6.1 and Opus, once rinexconv was finished. Scores and changes are in `docs/REVIEW_LOG.md`;
+newer decisions in `docs/DECISIONS.md` win over this plan where they differ. Every factual correction from those reviews was
 checked against the spec text in `specs/text/` before it went in.
 
 ---
@@ -19,7 +21,7 @@ checked against the spec text in `specs/text/` before it went in.
 | Constraint | Consequence |
 |---|---|
 | **Python plus the packages Anaconda ships, nothing else.** No `pip install`, no `conda install`. | Any package that `conda list` shows with channel `pypi` is off limits, even if installed. `unlzw3`, `georinex`, `hatanaka`, `hypothesis`, `gnsspy` and `pypdf` are all out. We write our own LZW (`.Z`) and Hatanaka (CRX) codecs. |
-| The finished tools run with no outside programs. | CRX2RNX, gfzrnx, RTKLIB, teqc and Anubis are allowed **only as optional dev-time oracles** in tests. Their results are also **archived**, as digests and hashes (§1.5c), so a laptop without them keeps the coverage. Shipped code never calls `subprocess`. |
+| The finished tools run with no outside programs. | CRX2RNX, gfzrnx, RTKLIB, teqc and Anubis are allowed **only as optional dev-time oracles** in tests. Their results are also **archived**, as digests and hashes (§1.5c), so a machine without them keeps the coverage. Shipped code never calls `subprocess`. |
 | Credentials are never committed, printed or sent anywhere but the Earthdata login host. | See CLAUDE.md and `docs/CDDIS.md`. |
 
 **Which module may import what.** This is enforced by an AST import-purity test (the
@@ -29,12 +31,13 @@ pattern in `reference/nav2sp3`).
 |---|---|
 | `rinexcore/` except `cddis.py`, and all of `rinexconv/` | Standard library only |
 | `rinexcore/cddis.py`, `tools/` | Standard library + `requests` |
-| `rinexqc/` | The above + numpy, scipy, matplotlib, plotly, jinja2; numba is optional, always with a pure-Python fallback |
+| `rinexqc/` | The standard library, rinexcore (never rinexconv: §3.9), numpy, scipy, matplotlib, plotly, jinja2; numba is optional, always with a pure-Python fallback. Network access only through `rinexcore/cddis.py` |
+| `tests/independent/` (including `qc/`) | The standard library and numpy; nothing from rinexcore, rinexconv or rinexqc |
 
 Anaconda 2024.10, the desktop's version, ships numpy 1.26, scipy 1.13, pandas 2.2,
 matplotlib 3.9, plotly 5.24, bokeh 3.6, numba 0.60, pyerfa, astropy, requests, jinja2,
-beautifulsoup4, lxml and pytest 7.4. The laptop's `conda list` is the source of truth,
-recorded in `docs/ENVIRONMENT.md` at setup.
+beautifulsoup4, lxml and pytest 7.4. The `conda list` of the machine in use is the source of truth,
+recorded in `docs/ENVIRONMENT.md` (the desktop and the laptop both).
 
 ---
 
@@ -100,7 +103,7 @@ a test.
    - (c) **Oracle results, archived** in `tests/oracle/ATTESTATION.json`: the tool, its
      version and sha256, and the command. Our output will never be byte-equal to gfzrnx's,
      so the archive stores **canonical digests** of each oracle output: per-system hashes
-     of the token multisets, plus counts per system, signal and epoch. A laptop without
+     of the token multisets, plus counts per system, signal and epoch. A machine without
      the oracle can still compare against them. **CRX2RNX is the exception:** our decoder
      must match it byte for byte, so the archive stores the **sha256 of its decompressed
      output** per corpus file, which is checked directly. Full oracle outputs are kept only
@@ -169,7 +172,8 @@ records grow from 4 to 5 lines in 3.05. NavIC L1 nav and GLONASS L1OC/L3OC nav a
   every system, RINEX 2's per-system files (`n` GPS, `g` GLONASS, `h` SBAS), and the
   non-standard `l` and `p` files where they turn up. A RINEX 2 reader also accepts C/J/I
   satellite ids in 2.11 files, as a flagged extension.
-- Out of scope for now: clock RINEX, ANTEX, IONEX, SINEX. They are different formats.
+- Out of scope for conversion: clock RINEX, ANTEX, IONEX, SINEX. They are different formats;
+  rinexqc reads some of them as inputs (§3.9).
 - Wrappers, read and write: plain, `.gz` and `.Z` (Unix compress, LZW), for every file
   type. **Hatanaka (observation files only):** CRINEX 1.0 (RINEX 2), 3.0 (RINEX
   3.x–4.01) and **3.1 (RINEX 4.02+, with the picosecond record)**, plain or combined with
@@ -186,8 +190,10 @@ records grow from 4 to 5 lines in 3.05. NavIC L1 nav and GLONASS L1OC/L3OC nav a
   --strict] [--nav FILE] [--glo-fcn FILE] [--overrides FILE] [--drop-unresolvable]
   [--assume-phase-aligned | --align-phases] [--dedupe] [--report FILE] [--eol lf|crlf]`.
   Batch mode over a directory, with one process per file (stdlib `multiprocessing`).
-- `python -m rinexqc IN [--nav FILE | --fetch-nav] [--sp3 FILE | --fetch-sp3] [--html]
-  [--json]`, plus `python -m rinexqc nav FILE` and `python -m rinexqc met FILE`.
+- `python -m rinexqc IN [--nav FILE] [--sp3 FILE] [--clk FILE] [--atx FILE] [--fetch]
+  [--glo-fcn FILE] [--overrides FILE] [--lenient] [--html FILE] [--json FILE]`, plus
+  `python -m rinexqc nav FILE` and `python -m rinexqc met FILE`. No network call without
+  `--fetch` (§5.1).
 - A library API. A small tkinter GUI (tkinter is stdlib) is optional, after the CLI is solid.
 
 ---
@@ -252,7 +258,7 @@ the single source of truth for the converter, but **not** for the independent ch
   The decoder must match CRX2RNX byte for byte on the whole corpus. That equality is also
   archived, per §1.5c. The encoder must round-trip through our decoder and through CRX2RNX.
 
-### 3.3 Canonical model (`rinexcore/model/`)
+### 3.3 Canonical model (`rinexcore/obs.py`, `nav.py`, `met.py`, `header.py`)
 
 This is a version-neutral representation that **never stores a value as a float on the
 write path**, and that keeps the raw bytes of each record for diagnostics:
@@ -363,14 +369,14 @@ write path**, and that keeps the raw bytes of each record for diagnostics:
   2. Pass 2 fixes the final per-system obs-type lists and writes the header. It then
      **formats** every spooled record against those lists.
 
-  Memory stays bounded: a **ceiling of 500 MB resident per file**, tested on the largest
-  1 Hz corpus file. Temporary disk space is about the output size.
+  Memory stays bounded: about 2 to 2.5 times the decoded file, linear in its size
+  (`tests/unit/test_memory.py`; the 24 h 1 Hz test in docs/DECISIONS.md). Temporary disk space is about the output size.
 - **Performance** is measured, not guessed. A 1 Hz, 24 h, multi-GNSS file is about 1 GB of
   text. Throughput (MB/s) is measured on the corpus at M2 and M3 and recorded in
-  `docs/ENVIRONMENT.md` with the laptop's hardware. Budgets are set from those numbers.
+  `docs/ENVIRONMENT.md` with the machine's hardware. Budgets are set from those numbers.
   Batch mode parallelises per file.
 
-### 3.5 Conversion rules (`rinexconv/rules/`)
+### 3.5 Conversion rules (`rinexconv/obsconv.py`, `codemap.py`, `navconv.py`, `metconv.py`)
 
 Every transformation is a named rule (`OBS.V2V3.CODEMAP.GLO.P2`, `NAV.V4V3.DROP.CNAV`, …)
 with a spec citation, a lossiness class and a report emitter.
@@ -484,7 +490,7 @@ A one-line human summary goes to stderr.
 - **Token comparator** (`tests/independent/`): implemented **separately**, with no imports
   from `rinexcore` model or spec tables. It is used for clause 5a.
 
-### 3.8 Validator (`rinexcore/validate/`)
+### 3.8 Validator (`rinexcore/validate.py`)
 
 A per-version linter driven by the spec tables. It checks:
 
@@ -497,6 +503,65 @@ A per-version linter driven by the spec tables. It checks:
 
 It gates conversion output, it implements `--strict`, and it is QC's "format compliance"
 section. Its findings are classed as header-only (repairable) or data-level.
+
+### 3.9 rinexqc (`rinexqc/`)
+
+rinexqc imports rinexcore, never rinexconv, so a QC result cannot depend on a conversion rule.
+The import-purity test gains that rule. What both need moves into rinexcore: the GLONASS
+channel lookup in `rinexconv/companion.py`, and the named nav fields (§5.4). Tests may use
+rinexconv, to make the version-invariance check and the injected files of §5.9.
+
+```
+rinexqc/
+  semantics.py   the adapter of §5.2: raw fields -> (system, band, attribute, value, flags), once
+  signals.py     frequencies and pairs (rinexqc/spec/, cited rows, as rinexcore/spec/ does)
+  run.py         one streaming pass over the epochs, feeding the accumulators
+  metrics/       time, availability, snr, clock, combos (mw, gf, mp, iono), slips
+  nav.py  met.py nav and met QC (§5.4, §5.5)
+  orbits/        broadcast propagation per message type, sp3, time scales, az/el (§5.6)
+  products/      readers for SP3, clock RINEX, ANTEX, bias SINEX, SINEX coordinates
+  spp.py         single point positioning
+  report/        json (schema docs/QC_SCHEMA.md), text, html
+  cli.py
+```
+
+- **One pass, bounded state.** rinexcore's reader yields epochs. It holds the decoded file in
+  memory, so QC's floor is the decoded size. Each metric is an accumulator, and its state is
+  bounded explicitly:
+  - windows (detrending, ROT, ROTI, slip tests) of a fixed number of epochs;
+  - online sufficient statistics (counts, sums, moments) for whole-arc results. An arc can last
+    the whole file (a BeiDou GEO for 24 h at 1 Hz). An estimator that needs a whole arc, such
+    as an arc median, either spools the arc to a temporary file (as rinexcore's spool does) or
+    uses a stated approximation. `QC_METRICS.md` says which quantiles are exact and which are
+    approximate;
+  - display buffers of a fixed size, filled only after the numbers are computed at full rate.
+
+  The epoch times and the receiver-clock series are the only per-epoch series kept for the
+  whole file. Within a window the work is numpy; numba is optional, with a pure-Python
+  fallback.
+- **Compliance is the validator's.** The reader checks fields as it goes (`iter_epochs`), but
+  reading a file is not validating it: a file can read cleanly and still lack mandatory header
+  records. The compliance findings come from rinexcore's validator (`validate.py`), run as its
+  own pass and budgeted in the resource targets with the reader. The converter's whole-file
+  check (`presurvey`) is in rinexconv, which QC does not import.
+- **A refusal part-way through.** If the reader refuses at epoch N, what was accumulated is
+  discarded and the file gets its compliance findings (D1). Under `--lenient`, the lenient
+  reader runs, and every metric keeps its own status (`ok`, `cannot-compute`, `not-applicable`) and carries a separate `lenient-read` flag.
+- **Resource targets, set in Q0b and met in Q1** (docs/ENVIRONMENT.md), on two files:
+  - the 24 h 1 Hz MIZU00JPN day 2026/290 (1.6 GB of RINEX 3.05, 7 systems; in
+    `data/highrate/`);
+  - a daily 30 s file.
+
+  Q0b measures the reader alone on both (its time and its peak memory) and sets targets against
+  it: QC's peak memory as the decoded size plus a bounded margin, its time as a multiple of the
+  reader's, and the size of the JSON and HTML outputs. Q1 must meet those targets; recording
+  what the finished code happens to use is not enough.
+- **Products** are inputs, never converted. §2's "out of scope" (clock RINEX, ANTEX, SINEX)
+  is about conversion; rinexqc reads them. Each product reader gets its own spec citations
+  and fixtures.
+- **Downloads** happen only through `rinexcore/cddis.py` with `--fetch`, into a local cache with a
+  sha256 manifest. The input matrix (`QC_METRICS.md`) lists, per metric, the files it needs. §6
+  lists where each product lives.
 
 ---
 
@@ -585,140 +650,424 @@ robustness fixtures.
 
 ## 5. rinexqc — quality analysis
 
-It works in tiers, each needing more inputs. With obs only, you still get tier A.
+rinexqc measures; it never changes the data. It works from three kinds of input, and each metric
+names the inputs it needs:
 
-### Tier A — the obs file alone
+- **the file alone:** an obs, nav or met file (§5.3 to §5.5);
+- **plus orbits:** broadcast nav or SP3 for the same span (§5.6);
+- **plus precise products and station metadata** (§5.7).
 
-- **Format compliance:** the validator's findings, header-only versus data-level.
+The architecture is §3.9; the milestones, Q0a to Q6, are in §7. Every formula, threshold and table
+goes in `docs/QC_METRICS.md` with a reference, checked against the source as the converter's
+spec tables were.
+
+### 5.1 The QC contract
+
+1. **Every number says what it is.** Each metric in the JSON result carries: its value or `null`;
+   its unit; its support (epochs, satellites, arcs used, and how many were excluded and why);
+   a status, one of `ok`, `degraded(reason)`, `cannot-compute(reason)` or
+   `not-applicable(reason)`; the method (a section of `QC_METRICS.md`); the threshold set and
+   its commit; and the inputs, by name and sha256. A missing value is `null` with a reason,
+   never 0.
+2. **Evidence apart from inference.** What a test saw is reported apart from what it is taken
+   to mean: "Δ geometry-free above threshold at these epochs" is evidence, "cycle slip" is an
+   inference. Anything that needs outside knowledge to be sure is labelled a **hypothesis**:
+   obstruction, scintillation, clock steering. Each detector states its detection limit
+   (§5.3.2).
+3. **Offline by default.** QC makes no network call unless asked (`--fetch`, through
+   `rinexcore.cddis`). A missing product disables only the metrics that need it, each with
+   `cannot-compute(missing <product>)`. The input matrix in `QC_METRICS.md` lists each
+   metric's inputs.
+4. **The version must not change the physics.** A file and its rinexconv conversion to a write
+   version give the same values for an enumerated list of physical metrics: counts, gaps,
+   clock jumps, SNR statistics and, from Q3, the combinations. They are compared on the
+   observations both files hold, with the same metadata and inputs. A conversion may also,
+   legitimately, change what QC is allowed to know, with or without a reported loss:
+   - `SIGNAL STRENGTH UNIT` is lost going to 2.x, so dB-Hz becomes relative;
+   - `GLONASS SLOT / FRQ #` is lost going to 2.x or 3.00 (a reported loss; rinexconv carries it
+     to 3.01), so FDMA metrics then need a nav file;
+   - going from v2 to v3, rinexconv's assumed attributes name an "attribute unknown" code;
+   - header repairs change `INTERVAL` and the counts.
+
+   So Q0a writes an **invariance table**, `tests/expectations/qc_invariance.json`, from the specs
+   before any Q1 code. It is keyed by the conversion report's categories (losses, repairs,
+   normalisations, assumptions), and says which QC fields may change and how (value, unit,
+   status). Compliance findings, provenance and metadata-dependent statuses get their own
+   expected changes. Signals are matched through the conversion report (a source's C2 with
+   "attribute unknown" is the target's assumed C2W, and the assumption is listed). This is a Q1
+   gate.
+5. **Damaged input** is decision D1 (§5.10). Proposed: QC reads what rinexcore reads. A file
+   the reader refuses gets its compliance findings only (the reader's `refused-corrupt` with
+   line, column and rule), plus the validator's. `--lenient` reads it with the lenient reader;
+   every metric keeps its own status (`ok`, `cannot-compute`, `not-applicable`) and carries a separate `lenient-read` flag.
+
+### 5.2 Observation semantics: one adapter
+
+rinexcore yields raw fields. Their meaning changes with the version (CLAUDE.md "RINEX
+gotchas"), so one adapter, `rinexqc/semantics.py`, applies each meaning **exactly once**.
+Every metric reads the adapter's output, never the raw fields:
+
+| Item | RINEX 2 | RINEX 3 and 4 | Source |
+|---|---|---|---|
+| Missing value | blank or `0.0` | blank or `0.0` | rinex211.txt Table A2; rinex305.txt §6.7 p.43 |
+| LLI bit 0 | lost lock: slip possible | same | as above |
+| LLI bit 1 | opposite wavelength factor to `WAVELENGTH FACT L1/2`, this epoch only | half-cycle ambiguity or slip possible | rinex211.txt Table A2; rinex305.txt §6.7.1 p.43, §5.2.13 p.28 |
+| LLI bit 2 | observed under antispoofing | BOC tracking of an MBOC signal, from 3.01 (3.00 defines bits 0 and 1 only) | rinex211.txt Table A2; rinex300.txt, rinex301.txt, rinex305.txt §6.7.1 p.43 |
+| Wavelength factor | `WAVELENGTH FACT L1/2` (header and events), GPS L1 and L2 only: factor 2 means the ambiguity spacing is half a wavelength (squaring receivers). Phase values stay in whole carrier cycles; nothing is rescaled | none | rinex211.txt §10.1.2, Table A1 |
+| SSI digit | 1-9, receiver-dependent projection | 1-9 mapped from dB-Hz when the raw value is in dB-Hz | rinex211.txt Table A2; rinex305.txt §6.7.2 p.43 |
+| S observations | units "receiver-dependent" | `SIGNAL STRENGTH UNIT` (optional, from 3.00; `DBHZ`) | rinex211.txt Table A1; rinex303.txt |
+| Event flags | 2 moving antenna, 3 new site, 4 header records follow, 5 external event; header records may follow flags 2-5. Flag 6 is followed by slip records, not header records | same | rinex211.txt §0.4 and Table A2; rinex305.txt §6.5 p.42 |
+| Scale factors | none | `SYS / SCALE FACTOR`, in the header and after events | rinex305.txt §5.2.11 p.26 |
+| Applied corrections | none | `SYS / DCBS APPLIED`, `SYS / PCVS APPLIED`: reported, and named by every metric they affect | rinex305.txt §5.2.9-5.2.10 p.26 |
+| Phase alignment | unknown | the alignment state of §3.3: unknown for 3.00 (no record) and for a blank 3.01 record; 3.01-3.05 records list the shifts applied, or the states of §3.3; 4.x aligned by definition | §3.3; docs/PHASE_ALIGNMENT.md |
+| Receiver clock | `RCV CLOCK OFFS APPL`, epoch-line offset | same | rinex211.txt Table A1; rinex305.txt |
+| Time system | GPS, except GLONASS-only files, which are in UTC; `GAL` allowed from 2.11; `TIME OF FIRST OBS` names it | the header's time system | rinex211.txt Table A1 and change log |
+
+What follows from the table:
+
+- **SNR** is in dB-Hz only when the unit is known: the header says `DBHZ`, or a user table names
+  the receiver as reporting dB-Hz (D5). Otherwise it is reported as relative values, and the
+  SSI digit as an ordinal value, never as dB-Hz.
+- **Signal identity** is (system, band, attribute). A RINEX 2 code has no attribute: C2 is the
+  L2C pseudorange in 2.11 (rinex211.txt Table A1), but which L2C component (S, L or X) is not
+  said, and P2 may be P(Y) or semi-codeless. The adapter keeps "attribute unknown". It never borrows rinexconv's
+  conversion default silently; `--overrides` sets attributes, as in rinexconv. The result says
+  which code fed each combination ("MP2 from P2", "MP2 from C2").
+
+**Frequencies and pairs** (`QC_METRICS.md`; from rinex_4.02.txt Tables 10-16, printed pp.29-34;
+checked against the PDF):
+
+| System | Bands (RINEX band: MHz) | Pairs supported (the preferred one first) |
+|---|---|---|
+| GPS | 1: 1575.42; 2: 1227.60; 5: 1176.45 | L1/L2, L1/L5, L2/L5 |
+| GLONASS FDMA | 1: 1602 + k·9/16; 2: 1246 + k·7/16 (channel k) | G1/G2 (needs k) |
+| GLONASS CDMA | 4: 1600.995; 6: 1248.06; 3: 1202.025 | G1a/G2a, G1a/G3 |
+| Galileo | 1: 1575.42; 5: 1176.45; 7: 1207.14; 8: 1191.795; 6: 1278.75 | E1/E5a, E1/E5b, E1/E5 (AltBOC), E1/E6 |
+| BeiDou | 2: 1561.098 (B1I, `C1I` in 3.02); 1: 1575.42 (B1C); 5: 1176.45 (B2a); 7: 1207.14 (B2I, B2b); 8: 1191.795; 6: 1268.52 (B3I) | BDS-2: B1I/B3I, B1I/B2I. BDS-3: B1I/B3I, B1C/B2a |
+| QZSS | 1: 1575.42; 2: 1227.60; 5: 1176.45; 6: 1278.75 | L1/L2, L1/L5 |
+| NavIC | 1: 1575.42 (from 4.01); 5: 1176.45; 9: 2492.028 | L5/S, L1/L5 |
+| SBAS | 1: 1575.42; 5: 1176.45 | L1/L5 |
+
+- Every supported pair is computed where the file has it, each reported under its own name.
+  The preferred pair is only the one the summary and the grade show.
+- BDS-2 or BDS-3 is decided by a dated PRN table from the satellite metadata (D2), not
+  guessed from the PRN alone.
+- **The GLONASS FDMA channel k** is found in the order rinexconv uses (§1 clause 8,
+  `rinexconv/companion.py`):
+  1. the file's own `GLONASS SLOT / FRQ #` (optional in 3.01, mandatory from 3.02). Unlike the
+     converter, which needs one channel per satellite for the header, QC follows the record
+     epoch by epoch: one in an event (flags 2-5) applies from that epoch on, to every satellite
+     it names, already tracked or not, and a change of channel is reported;
+  2. then `--glo-fcn`;
+  3. then a same-day nav file.
+
+  Sources that disagree are reported, never reconciled silently. Without a channel, every
+  metric that needs the wavelength is `cannot-compute(no-channel)`; the channel is never
+  assumed. RINEX 2 and 3.00 files have no channel record.
+
+### 5.3 Observation QC from the file alone
+
+#### 5.3.1 Counts, time, clock, SNR (Q1)
+
+- **Format compliance:** the validator's findings, header-only and data-level apart.
 - **Header consistency:**
-  - `INTERVAL` against the actual sampling; first and last obs times against the data;
-    the counts; declared obs types that are always blank.
-  - The approximate position: non-zero, and near the Earth's surface.
-  - Receiver and antenna names against IGS `rcvr_ant.tab`, and the antenna+radome pair
-    against `igs20.atx` (both optional downloads).
-- **Time:** duplicate or out-of-order epochs, epoch-tag jitter and **epoch-tag jumps**,
-  sampling regularity, gaps (whole file and per satellite), arc counts and lengths.
-- **Receiver clock.** Code minus phase alone can't see a clock jump that hits code and
-  phase equally, so each is tested separately:
-  - **Code jumps:** a step common to all satellites in epoch-differenced code, against
-    Doppler or geometry.
-  - **Phase jumps:** the same test on phase.
-  - **Receiver offset:** `RCV CLOCK OFFS APPL` and the epoch-line clock offset.
+  - `INTERVAL` against the actual sampling; first and last obs times against the data; the
+    counts; declared obs types that are always blank.
+  - The approximate position: non-zero, and within 50 km of the Earth's surface.
+  - Receiver and antenna names against IGS `rcvr_ant.tab`, and the antenna and radome pair
+    against `igs20.atx` (downloads: D2).
+- **Time:**
+  - The evaluation interval is from the first to the last epoch. The sampling grid comes from
+    `INTERVAL`, or else from the modal spacing.
+  - Duplicate and out-of-order epochs; epoch-tag jitter (offset from the grid) and epoch-tag
+    jumps.
+  - Gaps, for the whole file and per satellite.
+  - Arcs: a satellite's run of epochs. An arc ends at a gap longer than the threshold, at
+    flags 2 and 3 (a moving antenna, a new site) and at a change of type list. Slips split the
+    phase arcs of §5.3.2, not these.
+- **Availability:**
+  - Observed counts per (satellite, signal). An *observed count* is the number of epochs with a
+    **non-missing** value of that type; missing is blank **or** `0.0`, whatever LLI or SSI says.
+  - Code with phase, dual- and triple-frequency coverage, and LLI and half-cycle flags, read
+    through the adapter.
+- **SNR:** the distribution per signal and satellite, in the unit the adapter allows; drop-outs
+  against the arc's running median.
+- **Receiver clock, from the file alone.** Three discontinuity series are reported separately,
+  each with its support count:
+  - **code:** a step common to all satellites in epoch-differenced code;
+  - **phase:** the same test on phase, in metres;
+  - **epoch tags:** jumps of the time tags themselves.
 
-  The result classifies the receiver as code-only, both, or steered, and gives the drift.
-- **Availability:** observations per system, signal and satellite. Code with phase,
-  dual- and triple-frequency coverage, LLI and half-cycle flags.
-- **SNR:** distribution per signal and satellite, and drop-outs.
-- **Cycle slips.** No single test catches every slip, so several run together:
-  - **Melbourne–Wübbena** is ionosphere-free, but blind to equal-cycle slips on both
-    frequencies.
-  - **Geometry-free** catches those, but must be gated against ionospheric activity.
-    Squidy found that geometry-free alone counts scintillation as slips.
-  - **Single-frequency** checks: phase minus code, and Doppler-integrated phase.
-  - **LLI against detected slips**, as a cross-check.
+  Also reported: `RCV CLOCK OFFS APPL` and the epoch-line clock offset, as given. Doppler, where
+  the file has it, is a cross-check: 75 of the 120 RINEX 2 corpus files have none. Millisecond
+  jumps (about 300 km in code) are found at any cadence; smaller steps only above a noise
+  floor per cadence (`QC_METRICS.md`).
 
-  Results: slip counts, observations per slip (teqc's `o/slps`) and slip epochs.
-- **Multipath:** MP1/MP2/MP5 and per-signal code-minus-carrier, with the per-arc mean
-  removed, as RMS per satellite and signal. Formulas in `docs/QC_METRICS.md`.
-- **Phase noise:** high-order time differences per signal.
-- **Ionosphere:** IOD and geometry-free rate, ROT and ROTI, an S4-like SNR proxy (caveat:
-  true S4 needs 50 Hz data).
-- **Consistency:** code against Doppler, phase against Doppler, inter-signal.
+  The receiver is classed as "jumps in code only", "jumps in code and phase", "no jumps" or
+  "undetermined". **Steering and drift are not inferred here.** They need a clock series from
+  the epoch-line offset or from SPP (§5.6); without one, they are `cannot-compute`.
 
-### Tier B — plus broadcast nav or SP3 (downloadable from CDDIS)
+#### 5.3.2 Combinations (Q3)
 
-- **Orbits:**
-  - Keplerian for GPS, Galileo, BeiDou MEO/IGSO, QZSS and NavIC.
-  - **BeiDou GEO** gets its own −5° rotation.
-  - GLONASS: RK4 integration in PZ-90 with the broadcast accelerations.
-  - SBAS from its ECEF state.
-  - SP3: interpolation.
+Each combination is defined in `QC_METRICS.md` with:
 
-  Time scales (GPST, GST, BDT, GLONASST, QZSST, IRNSST) are converted explicitly.
-  GLONASS wavelengths are per channel. The result is azimuth and elevation.
-- **Completeness:** expected against observed observations above the mask. The expected
-  count is *satellites above the mask with a healthy ephemeris* × *signals the receiver
-  declares* × *signals that satellite transmits*. That last factor comes from a dated
-  per-block signal table (L2C from IIR-M on, L5 from IIF, and so on). Tracked against
-  visible satellites.
-- **Sky plots** of SNR, multipath, slips and gaps, plus an **obstruction map** (missing or
-  low SNR by azimuth and elevation).
-- SNR and multipath against elevation, binned.
-- **Single point positioning** per epoch:
-  - Inter-system clock offsets estimated per system; TGD/BGD/ISC applied for the signal
-    used.
-  - Ionosphere-free combination when dual-frequency, else Klobuchar (or the BDS
-    equivalent).
-  - A troposphere model; Sagnac and relativity corrections.
+- its formula and unit;
+- its pair, from the table in §5.2, and which code and phase attributes feed it;
+- where its arcs reset (a gap, LLI bit 0, a flag-6 record, a type change);
+- its detrending and window;
+- the cadences it is valid at;
+- its noise amplification.
 
-  Outputs: scatter against the header position and the IGS reference, DOPs, code residuals
-  per satellite, receiver clock.
-- **Nav file QC** (`rinexqc nav`): ephemeris coverage, gaps, health and accuracy flags, IOD
-  consistency, duplicates. **SISRE** against SP3:
-  - Broadcast orbits refer to the antenna phase centre and SP3 to the centre of mass, so
-    satellite PCOs from `igs20.atx` are applied.
-  - Clock conventions are aligned: the relativistic term, the TGD reference signal, and a
-    per-epoch clock-datum removal.
-  - Radial, along-track and cross-track errors are weighted per constellation, with the
-    weights cited.
+The combinations:
 
-### Tier C — plus precise products and station metadata
+- **Melbourne–Wübbena** (wide-lane cycles): ionosphere-free, and blind to slips of equal cycles
+  on both frequencies.
+- **Geometry-free phase** (m). A GPS (1,1) slip moves it by λ2 − λ1 = 0.0539 m, which at 30 s
+  is within ordinary ionospheric change at low elevation. **At 30 s such a slip is not reliably
+  detectable. At 1 Hz detection may improve, but cadence alone guarantees nothing:** it depends
+  on the noise, the ionosphere and the observables the file has. QC_METRICS.md states each
+  test's eligibility and its measured precision and recall per cadence, from §5.9.
+- **Single-frequency tests:** phase minus code; Doppler-integrated phase, where the file has
+  Doppler, at 1 Hz or faster only.
+- **Multipath** MP1, MP2 and MP5, and per-signal code minus carrier. The per-arc bias estimator
+  is named (squidy uses the arc median and drops arcs under 10 epochs: `math.md`); dropped arcs
+  are counted. RMS is per satellite and signal; the result is multipath plus code noise, and is
+  reported as such.
+- **Phase noise:** high-order time differences, at 1 Hz or faster only, and on static segments
+  only (the differences also hold receiver dynamics).
+- **Ionosphere:** the geometry-free rate in TECU/min, ROT, and ROTI (the standard deviation of ROT
+  over 5 minutes: Pi et al. 1997). An S4-like SNR proxy at 1 Hz or faster only, labelled a proxy.
+  None of these is called scintillation.
+- **Slips.** Each test's evidence is reported apart (MW, GF, single frequency, Doppler, LLI). The
+  inferred slips combine them under documented rules. The result also gives observations per
+  slip (teqc's `o/slps`) and the slip epochs.
+- **Consistency:** code against Doppler, phase against Doppler, and between signals; the last
+  needs the phase-alignment state.
 
-- Code residuals against precise orbits and clocks, with the corrections listed
-  explicitly: satellite and receiver PCO/PCV from ATX, receiver ARP, troposphere,
-  relativity, Sagnac, and code biases (OSB/DCB).
-  Squidy's correction chain is the starting point, but it is approximate: block-level PCOs,
-  and see its `math.md` "not modelled" list. Each addition is listed.
+### 5.4 Navigation QC
+
+**From the file alone (Q1):**
+
+- Ephemeris coverage per satellite, and gaps.
+- Health and accuracy flags as broadcast (URA, SISA).
+- IOD consistency: IODE and IODC; Galileo IODnav; BeiDou AODE and AODC; GLONASS tb.
+- Toe, toc, transmission time and the fit interval.
+- Duplicates, identical apart from conflicting (same satellite and toc, different values).
+- Parameter ranges against each ICD (√A, e, i, clock terms).
+- The GLONASS tk basis (day or week: the known damage in real 3.x files).
+- RINEX 4 message types per system.
+
+This needs fields by name. Today `NavRecord.vals` holds them by position (rinexcore/nav.py), so
+a named-field table goes into `rinexcore/spec/`, with its own spec citations.
+`tests/independent/navfields.py` stays the independent check, and nothing may import it.
+
+**With SP3 and clocks (Q4): SISRE.**
+
+- SP3 positions refer to the centre of mass. Broadcast orbits refer to the antenna phase
+  centre, except GLONASS, which probably refers to the centre of mass (to be checked against
+  Montenbruck et al. 2015 before it is relied on). The ionosphere-free satellite PCO from
+  `igs20.atx` is applied, with nominal yaw.
+- The broadcast clock's reference is declared per system and message, from each ICD.
+  - The GPS L1/L2 ionosphere-free clock takes **no** further TGD correction: TGD is for
+    single-frequency users.
+  - Galileo: I/NAV refers to E1/E5b and F/NAV to E1/E5a. BeiDou: B3I, with TGD1/TGD2 for B1I and
+    B2I, and the BDS-3 CNAV TGD_B1Cp and TGD_B2ap.
+  - The references for GLONASS, QZSS, NavIC and SBAS are written in `QC_METRICS.md`, each with
+    its source.
+  - Each single-signal clock is derived explicitly from these.
+- Before any comparison, `QC_METRICS.md` fixes the precise clock's reference, the clock datum
+  per constellation (the ensemble removed per epoch) and the relativistic convention.
+- When the precise clocks are missing, the result is orbit-only SISRE.
+- Radial, along-track and cross-track errors are weighted per constellation and orbit class
+  (MEO, IGSO, GEO), with the weights cited.
+- Published SISRE values are context only, never a gate.
+
+### 5.5 Meteorological QC (Q1)
+
+Met QC needs no products:
+
+- ranges per observation type (PR, TD, HR, ZW, ZD, ZT, WD, WS, RI, HI);
+- gaps and sampling;
+- jumps, with thresholds in `QC_METRICS.md`;
+- sensor headers (`SENSOR MOD/TYPE/ACC`, `SENSOR POS XYZ/H`): present, and consistent with the
+  data.
+
+### 5.6 Obs QC with orbits: broadcast nav or SP3 (Q2, Q4)
+
+**Orbits.** For each system and message type, `QC_METRICS.md` gives:
+
+- the propagation:
+  - Keplerian for GPS, Galileo, BeiDou MEO and IGSO, QZSS and NavIC, with the CNAV, CNV2 and
+    BDS CNV1-3 terms (Ȧ, Δṅ0 rate);
+  - BeiDou GEO with its −5° rotation;
+  - GLONASS by RK4 in PZ-90, with the broadcast accelerations;
+  - SBAS from its ECEF state;
+  - SP3 by interpolation, with the order, window and edge handling stated;
+- the selection and expiry rules (fit interval, health, IOD tie-break);
+- the time scale (GPST, GST, BDT, GLONASST, QZSST, IRNSST), converted explicitly. RINEX `GLO`
+  time tags, in obs and nav files, have UTC hours, not the UTC+3 h of GLONASS system time
+  (rinex_4.02.txt §4.1.2 p.15), so they get no 3 h conversion;
+- the frame;
+- the clock polynomial and relativistic term;
+- the group delays per signal (TGD, BGD, the BeiDou TGDs relative to B3I, ISCs).
+
+Satellite positions include the signal travel time and the Earth's rotation during it.
+Azimuth and elevation come from the header position, an SPP position or the IGS20
+coordinates, whichever is given (the result says which).
+
+**Completeness:** three numbers per satellite and signal, over the evaluation interval, never
+merged into one. The grid is the declared cadence (`INTERVAL`) and the inferred one (the modal
+spacing), both reported. Where they disagree, the result says which one it used and why: real
+files often have `INTERVAL` wrong.
+
+- **geometric visibility:** above the elevation mask (configurable), from the orbits;
+- **healthy-nav availability:** a healthy ephemeris exists ("healthy" defined per system from
+  each ICD's health fields, in `QC_METRICS.md`). SP3 carries no broadcast health, so
+  with SP3 alone this number is `cannot-compute`, and so is health-conditioned tracking
+  completeness. A "visible only" variant is reported instead, under its own name and status;
+- **tracking completeness:** observed / expected. The expected count is the epochs when the
+  satellite is visible and healthy × the signals the receiver declares at that epoch (type lists
+  may change mid-file) × the signals that satellite transmits. That last factor comes from a
+  dated PRN → SVN → block table, built from the IGS satellite metadata SINEX (D2).
+
+Block metadata says what a satellite can transmit, not that it did. So each completeness
+result gives, apart:
+- the known-eligible trials: *K* expected, of which *k* observed;
+- the trials whose eligibility is unknown (the transmission or the receiver configuration),
+  split into *U*ₒ observed and *U*ₘ missing.
+
+The bounds come from varying the unknown trials' eligibility, with numerator and denominator
+changing together:
+- lowest: *k* / (*K* + *U*ₘ), the missing unknowns counted as eligible and the observed ones
+  left out;
+- highest: (*k* + *U*ₒ) / (*K* + *U*ₒ), the reverse.
+
+A zero denominator is `cannot-compute`, and so is a result with nothing known. Unknown trials
+are never dropped silently. Fixtures test both kinds of unknown and the zero cases.
+
+**Sky plots** of SNR, multipath, slips and gaps. The **obstruction map** (missing or low SNR by
+azimuth and elevation) is labelled a hypothesis: obstruction, multipath and the antenna pattern
+look alike. SNR and multipath against elevation, binned.
+
+**Single point positioning** per epoch:
+
+- models named in `QC_METRICS.md`:
+  - the troposphere: Saastamoinen with a standard atmosphere, as RTKLIB's SPP uses, so the Q4
+    comparison matches models;
+  - the ionosphere-free combination with dual frequencies;
+  - with one frequency, Klobuchar for GPS and QZSS, the BeiDou Klobuchar coefficients, and for
+    Galileo NeQuick-G or Klobuchar as an approximation (D3);
+- group delays for the signals used, and an inter-system clock offset per system;
+- a rank check (at least 3 + the number of systems satellites), convergence and residual checks;
+- Selective Availability: the 15 corpus obs files from 1998 have SA on (until 2 May 2000), so
+  their SPP scatter is reported with that note, not graded against modern files;
+- Sagnac and relativity.
+
+Outputs: the scatter against the header position and the IGS20 coordinates, DOPs, code
+residuals per satellite, and the receiver clock. That clock series is what §5.3.1's steering
+and drift need.
+
+### 5.7 With precise products and station metadata (Q6)
+
+- Code residuals against precise orbits and clocks, with the corrections listed explicitly:
+  satellite and receiver PCO/PCV from ATX, receiver ARP, troposphere, relativity, Sagnac, and
+  code biases (OSB). Squidy's correction chain is the starting point, but it is approximate:
+  block-level PCOs, and see its `math.md` "not modelled" list. Each addition is listed.
 - Comparison with the IGS20 coordinate solution and the site log (antenna height, types).
 - **Multi-day trends:** a station health history, like squidy's calendar heatmap.
-- **Met QC** (`rinexqc met`): ranges, gaps, sensor headers.
 
-### Outputs
+### 5.8 Outputs
 
-- A JSON result with a versioned schema.
-- A **self-contained offline HTML report**: plotly with the library embedded.
-- A teqc-style one-screen text summary.
-- An overall grade with documented, configurable weights. The grade never hides the
-  numbers behind it.
+- A JSON result with a versioned schema (`docs/QC_SCHEMA.md`), as §5.1 describes.
+- A **self-contained offline HTML report**: plotly, with the library embedded. Everything is
+  computed at full rate; series are thinned only for display.
+- A one-screen text summary in the style of teqc.
+- An overall grade, from a grading profile the user approves (D4). A metric that cannot be
+  computed is shown as such, and its weight is never silently given to the others. The grade
+  never hides the numbers behind it.
 
-### Validation of the QC numbers
+### 5.9 Validation of the QC numbers
 
-- **Calibrate, freeze, then validate on held-out files.** The obs corpus is split by a
-  fixed seed into a *calibration* half and a *held-out* half, listed in
-  `tests/corpus/qc_split.json`. The split is **by station**, using the 4-character marker:
-  every file from one station goes into the same half, whatever its day, cadence
-  (daily, hourly, high-rate) or encoding. The corpus has several such groups, for example
-  HKSL daily and hourly, and EBRE plain and Hatanaka. Without grouping, the held-out
-  numbers would leak. Thresholds are tuned on the calibration half only, then
-  frozen in `docs/QC_METRICS.md` along with the commit hash. Only after that are the QC
-  acceptance numbers computed on the held-out half.
-- **Synthetic injection:** use rinexconv's writer to put known events into real files:
-  slips (including **equal-cycle slips on both frequencies**), gaps, code-only and
-  code+phase clock jumps, multipath and SNR drops. Then measure the detection rate and
-  false alarms per day: calibration targets first, held-out results reported.
-- **Controlled numerical fixtures** for every computed quantity: orbits, az/el, SPP,
-  SISRE and residuals. Synthetic inputs with known answers, such as a broadcast record
-  and an SP3 built from the same state with known offsets, or a station with known
-  geometry.
-- **Oracles (dev):** teqc `+qc` on RINEX 2 and Anubis on RINEX 3.
-  - Observed counts must match exactly.
-    - An *observed count* is the number of (epoch, satellite) pairs with a **non-missing**
-      value for that obs type.
-    - **Missing** follows the format's own rule: blank **or** `0.0` (§3.3). Any LLI or SSI
-      present doesn't change that.
-    - Each oracle's own eligibility rules come on top, for example teqc counting pairs with
-      both code and phase. Those rules are written per oracle in `docs/QC_METRICS.md`.
-    - Zero-versus-blank fixtures test the definition.
-  - Expected counts are compared loosely, because the elevation mask and orbit source
-    differ.
-  - Multipath RMS within max(2 cm, 10%).
-  - Slips: match the slip epochs within ±1 epoch, with an absolute-or-relative band on the
-    count of max(2, 20%). Counts are small, often 2–25 per day.
-- **RTKLIB SPP** within a justified tolerance.
-- Every formula goes in `docs/QC_METRICS.md` with a reference: Estey & Meertens 1999
-  (teqc); Vaclavovic & Dousa 2016 (Anubis); Blewitt 1990 (TurboEdit); Pi et al. 1997
-  (ROTI); IS-GPS-200, the Galileo OS SIS ICD, the BDS ICDs, the GLONASS ICD and the NavIC
-  ICD for orbits; Montenbruck et al. for SISRE weights. Squidy's `math.md` is the template.
+- **Gates are numbers, frozen before the code.** Each Q milestone starts by writing its numeric
+  gates (per metric, cadence and event class, including the expected outcomes for corrupt
+  files) into `QC_METRICS.md`. The user signs them off before calibration starts.
+- **Independent checks** in `tests/independent/qc/`, with their own frequency table and their own
+  combination code, written from the specs. They import nothing from rinexqc, rinexcore or
+  rinexconv; the existing meta-test covers the folder. This is the converter's round-32
+  lesson: a checker that shares code with what it checks cannot see a shared mistake.
+- **Hand-written fixtures** for every metric, with **negative controls** and **confounders**:
+  an ionospheric gradient, a noisy low-elevation arc, a kinematic segment. They must stay
+  within the frozen false-alarm limits for slips and clock jumps. The ionosphere and SNR metrics
+  must still respond to the real variability in them.
+- **Synthetic injection into real files.** Known events are written with rinexconv's writer:
+  - slips, including **equal-cycle slips on both frequencies**;
+  - gaps and epoch-tag jumps;
+  - millisecond and smaller clock jumps, code-only and code-and-phase;
+  - SNR drops, and multipath-like code errors.
+
+  A truth ledger lists every field changed. The independent token comparator checks that each
+  injected file differs from its source by exactly the ledger.
+
+  Results are precision and recall per event class and size, with confidence intervals, and
+  false alarms per satellite-hour. Real files hold real events, so false alarms on them are
+  counted as **incremental** only. Absolute false-alarm rates come from fully synthetic
+  observations built from SP3 by independent test code.
+- **Calibrate, freeze, then validate on held-out files.**
+  - The obs corpus is split by station, using the 4-character ID **from the file name** (MARKER
+    NAME is free text). Every file from one station goes into the same half, whatever its day,
+    cadence or encoding.
+  - The split is stratified by cadence, version, receiver and constellations, with its coverage
+    published (`tests/corpus/qc_split.json`). Q0a fixes the rule; the corpus additions of Q0b
+    join by the same station rule, and the split is frozen only then, before any calibration.
+  - Thresholds are tuned on the calibration half only, then frozen in `QC_METRICS.md` with the
+    commit hash. Only then are the acceptance numbers computed on the held-out half.
+  - Retuning after a held-out evaluation needs fresh validation files.
+- **Corpus additions before Q3**, from CDDIS:
+  - more 1 Hz data (today 25 files of 15 minutes, 6.25 h in all, every one from 2026 day 274);
+  - more hourly files;
+  - ionospherically active days (a storm day);
+  - RINEX 2 files with Doppler;
+  - a kinematic file.
+- **Oracles (dev only, archived as digests):**
+  - **teqc** is not available (the user has no copy): historical context only.
+  - **Anubis** (G-Nut/Anubis), pinned by version and sha256, with its configuration archived.
+    It is the oracle for observed counts, multipath and slips on the files it reads. For the
+    other versions, the file is converted with rinexconv to one Anubis reads, and both are QC'd.
+    To check when it is fetched: whether it reports slip epochs, and its multipath arc and mask
+    rules.
+  - **RTKLIB** for SPP (Q4).
+  - Before any tolerance is compared, pairs, arcs, masks and statistics are matched to the
+    oracle's; its eligibility rules are written per oracle in `QC_METRICS.md`.
+  - A skipped oracle test says what it left unverified, and skips alone cannot meet acceptance.
+- **Controlled numerical fixtures** for every computed quantity: orbits, az/el, SPP, SISRE and
+  residuals. They are synthetic inputs with known answers: a broadcast record and an SP3 built
+  from the same state with known offsets, or a station with known geometry. Sensitivity tests
+  belong with them, each placed where it can fail:
+  - **the orbit gate** (broadcast minus SP3 at a common epoch): each of these faults, injected
+    alone, must fail it:
+    - BDT taken as GPST;
+    - a 3 h shift wrongly applied to RINEX `GLO` time tags (they are UTC hours);
+    - the UTC-GPST leap seconds left out;
+    - a wrong week rollover;
+    - the BeiDou GEO rotation left out;
+  - **geometric range and az/el**, checked against independent test code (Q2), and **SPP** (Q4):
+    a missing Sagnac term, no signal travel time, or a 1 s time-tag offset on the observation
+    side must each fail. A broadcast–SP3 comparison at a common epoch involves no travel time,
+    so it cannot catch these.
+- Every formula goes in `QC_METRICS.md` with a reference: Estey & Meertens 1999 (teqc);
+  Vaclavovic & Dousa 2016 (Anubis); Blewitt 1990 (TurboEdit); Pi et al. 1997 (ROTI); IS-GPS-200,
+  the Galileo OS SIS ICD, the BDS ICDs, the GLONASS ICD and the NavIC ICD for orbits; Montenbruck
+  et al. for SISRE weights. Squidy's `math.md` is the template.
+
+### 5.10 Open decisions (the user's)
+
+| # | Decision | Proposed |
+|---|---|---|
+| D1 | What QC does with a file the reader refuses as damaged | Compliance findings only; `--lenient` reads it, each metric keeping its own status plus a `lenient-read` flag |
+| D2 | Downloads from outside CDDIS and BKG: `igs20.atx`, `rcvr_ant.tab`, the IGS satellite metadata SINEX, site logs (files.igs.org), and fetching Anubis and RTKLIB | Fetch each once, record its version and sha256, as for the oracles |
+| D3 | Galileo single-frequency ionosphere in SPP | Klobuchar as a reported approximation first; NeQuick-G later if wanted |
+| D4 | The grading profile (weights, which metrics count) | Drafted at Q5, shown with the report, approved by the user |
+| D5 | SNR units when the header does not say | Relative values; dB-Hz only for receivers the user lists |
 
 ---
 
@@ -741,6 +1090,18 @@ These were verified against the live archive on 2026-10-30 (see `docs/CDDIS.md`)
 manifest, a cap of 4 parallel connections, and checksum verification.
 `tools/build_corpus.py` already has the parallel fetch, the header screen and the manifest.
 
+**Products rinexqc reads.** Each location is checked on the live archive when `cddis.py` is
+built (Q0b), and recorded in `docs/CDDIS.md`:
+
+| Product | Used for | Where |
+|---|---|---|
+| Merged broadcast nav: `BRDC00IGS_R_…_MN.rnx.gz` (3.x), `BRD400DLR_S_…_MN.rnx.gz` (4.02) | Orbits, nav QC | CDDIS `data/daily/YYYY/brdc/` |
+| SP3 orbits: IGS final (GPS, GLONASS); MGEX multi-GNSS (for example `COD0MGXFIN`, `GFZ0MGXRAP`, `WUM0MGXFIN`) | SP3 orbits, SISRE | CDDIS `products/WWWW/` (older MGEX weeks: `products/mgex/WWWW/`, to verify) |
+| Clock RINEX, 30 s | SISRE, residuals | as for SP3 |
+| Observable-specific biases (bias SINEX) | SPP group delays, residuals | CDDIS `products/bias/` (to verify) |
+| IGS20 coordinates (SINEX) | az/el station position, coordinate check | CDDIS `products/WWWW/` |
+| `igs20.atx`, `rcvr_ant.tab`, the IGS satellite metadata SINEX, site logs | PCO/PCV, name checks, PRN → SVN → block, station metadata | files.igs.org: outside CDDIS and BKG, so the user decides (D2) |
+
 ---
 
 ## 7. Milestones
@@ -751,7 +1112,7 @@ fixing what they find.
 
 | # | Milestone | Done when |
 |---|---|---|
-| M0a | Environment check, repo, .gitignore, `rinexcore.cddis`, import-purity test, corpus verified against its manifest | `python -m rinexcore.cddis --selftest` passes; `python tools/build_corpus.py --verify` passes |
+| M0a | Environment check, repo, .gitignore, `rinexcore.cddis`, import-purity test, corpus verified against its manifest | `python -m rinexcore.cddis --selftest` passes (not built in M0a: moved to Q0b); `python tools/build_corpus.py --verify` passes |
 | M0b | `docs/HATANAKA.md` grammar from `crx2rnx.c`; `allowed_losses.json` v0 by (source, target, type, category) from the specs; the obs-count and token definitions used by the independent checks | Reviewed by the user and one reviewer before M1 |
 | M1 | Codecs: gz, `.Z` decode/encode, CRX decode (1.0/3.0/3.1) | The CRX decoder matches CRX2RNX on the whole corpus; results archived. The corpus has **no CRINEX 3.1 file**: the five real 4.02 obs files carry CRINEX 3.0 headers. So a 3.1 fixture with picosecond epochs is made with RNX2CRX 4.2.0 and archived. RNX2CRX.exe comes from the same GSI zip as CRX2RNX.exe (URL in `reference/tools/rnxcmp-4.2.0/provenance.json`), with its sha256 recorded. The laptop has no C compiler, so don't plan to build it |
 | M2 | Obs spec tables (all versions), model with header timeline, obs readers 2/3/4, validator v1, token comparator | All corpus obs files parse; throughput measured |
@@ -762,14 +1123,17 @@ fixing what they find.
 | M6 | Met | The same, for met |
 | M7 | Oracle sweep and archiving, fuzz, performance, corpus gap fill | rinexconv 1.0 acceptance (§4) |
 | M8 | CLI polish, batch mode, docs, generated conversion matrix | Ready to hand to someone else |
-| Q1 | QC tier A + JSON + text summary; nav and met QC basics | Runs on the whole corpus; injection targets set and met |
-| Q2 | Orbits (all systems + SP3), az/el, completeness, sky plots | Elevation within 0.01° of SP3-derived values |
-| Q3 | Slips, multipath, phase noise, ionosphere | Within the §5 tolerances of teqc and Anubis |
-| Q4 | SPP, nav file QC with SISRE | Controlled SPP and SISRE fixtures pass. RTKLIB SPP agrees on matched epochs and satellites with the same signals and corrections. Published SISRE values are context only, never a gate |
-| Q5 | HTML report, grade | Report reviewed by the user |
-| Q6 | Tier C: precise-product residuals, metadata checks, multi-day trends | Controlled residual fixtures pass, with each correction term tested alone. Squidy's ORD is a sanity check only, since its corrections differ |
+| Q0a | QC documents and decisions: `docs/QC_METRICS.md` v0 (the semantics table, the frequency and pair table, each metric's definition and inputs, Q1's numeric gates), `docs/QC_SCHEMA.md` v0, the invariance table (§5.1), the station split's rule, decisions D1-D5 put to the user | Reviewed by the user and one reviewer; the user signs off Q1's gates |
+| Q0b | QC groundwork: `rinexcore/cddis.py` (§6) with its selftest; the named nav fields in `rinexcore/spec/`; the GLONASS channel lookup moved to rinexcore; the corpus additions of §5.9; Anubis and RTKLIB fetched and pinned (D2); the split frozen once the additions are in (§5.9); the reader's own time and memory on the two budget files, and the resource targets set from them (§3.9) | Selftest and tests green; the downloads recorded with versions and sha256. Q1 starts when Q0a and Q0b are both done |
+| Q1 | Obs QC from the file alone, part 1 (§5.3.1); nav QC from the file (§5.4); met QC (§5.5); JSON and text summary | On the whole corpus: (a) observed counts per (satellite, signal) equal the independent checker's, and Anubis's on the files it reads; (b) the enumerated physical metrics of §5.1 item 4 agree between each file and its rinexconv conversions to every write version, and every other difference is one `tests/expectations/qc_invariance.json` allows for a category in the conversion report; (c) injected gaps, epoch-tag jumps, clock jumps (millisecond and smaller; code-only and code-and-phase) and SNR drops meet the frozen targets on the held-out half, each injected file checked against its ledger; (d) every metric has a status; (e) the MIZU 1.6 GB day and the daily file meet the resource targets set in Q0b (§3.9) |
+| Q2 | Orbits per message type, SP3, time scales, az/el, completeness, sky plots (§5.6) | Broadcast minus SP3 3D position per system and orbit class (the clock comparison is Q4's, under §5.4's conventions), within bounds frozen at Q2's start (broadcast orbits refer to the antenna phase centre, SP3 to the centre of mass: with `igs20.atx` (D2) the PCO is applied, otherwise the bounds carry a stated APC–CoM allowance per system); the sensitivity tests fail as they must; az/el against an independent implementation in the tests (pyerfa or astropy, in test code only); the controlled fixtures pass |
+| Q3 | Combinations, slips, multipath, phase noise, ionosphere (§5.3.2) | Injected slips above each cadence's stated detection limit: precision and recall at the frozen targets on the held-out half, with confidence intervals; multipath RMS within max(2 cm, 10%) of Anubis once pairs, arcs and masks are matched; slip epochs within ±1 epoch of Anubis's where it reports them, slip counts as context; the confounder fixtures stay within the frozen false-alarm limits, while the ionosphere and SNR metrics still respond to their real variability (§5.9) |
+| Q4 | SPP; nav QC with SISRE (§5.4, §5.6) | Controlled SPP and SISRE fixtures pass. RTKLIB SPP agrees on matched epochs and satellites with the same signals and corrections, within tolerances frozen at Q4's start. Published SISRE values are context only, never a gate |
+| Q5 | HTML report, grade (§5.8) | The grading profile approved by the user (D4); the report reviewed by the user |
+| Q6 | Precise products and station metadata (§5.7) | Controlled residual fixtures pass, with each correction term tested alone. Squidy's ORD is a sanity check only, since its corrections differ |
 
-QC can start once M4 is done. Q1 can run alongside M5 and M6.
+rinexconv was finished on 2026-11-06 (M0a-M8); QC starts with Q0a and Q0b. Each Q milestone ends as the M
+milestones do, and starts by freezing its numeric gates (§5.9).
 
 ---
 
@@ -784,8 +1148,12 @@ QC can start once M4 is done. Q1 can run alongside M5 and M6.
 | The RINEX 4 nav message zoo grows | Table-driven layouts with version gating; a new message type is a table row plus fixtures |
 | Hatanaka edge cases | Grammar written first; byte equality against CRX2RNX on every corpus file; CRX fuzzing |
 | Pure-Python speed | Two-pass streaming, measured budgets, per-file multiprocessing, optional numba |
-| The laptop's Anaconda is older or newer | Checked at setup; the core stays stdlib; versions recorded |
-| CDDIS changes or goes down | BKG mirror, FTPS fallback, local cache, corpus kept on the F: drive |
+| The machine's Anaconda is older or newer | Checked at setup; the core stays stdlib; versions recorded (numpy 1.26 here: test any numpy code on both machines' versions) |
+| CDDIS changes or goes down | BKG mirror, FTPS fallback, local cache, the corpus kept locally with its manifest |
+| QC and its checks share a mistake | `tests/independent/qc/` with its own tables and code, the import meta-test, hand-written fixtures (§5.9) |
+| QC claims more than the data show | Evidence apart from inference, hypotheses labelled, detection limits per cadence (§5.1, §5.3.2) |
+| An oracle defines a metric differently | Pairs, arcs, masks and statistics matched before any tolerance; each oracle's rules written down (§5.9) |
+| A 1.6 GB file exhausts memory | One pass with per-arc state; budgets measured on the MIZU day (§3.9) |
 | Oracle licences: gfzrnx needs its own registration; teqc is retired | All oracles optional; the user downloads them; results archived once |
 
 ---
@@ -799,9 +1167,9 @@ references, are in `reference/README.md`.
 |---|---|---|
 | `cddis_https/sp3_downloader.py`, `config.py` | Earthdata auth class, hop-by-hop redirects, HTML check, credentials lookup | Imports `unlzw3` (from pip) and `backend.*` (not copied); whole-body downloads; no resume, cache manifest or checksum support |
 | `cddis_https/cddis_browser.py` | — | Parses HTML listings with bs4. Use `*?list` instead |
-| `squidy/` | `math.md` formulas; MP, ROTI, slip-detection lessons; pseudorange sanity gates; troposphere; FTPS fetcher | GPS only. Reads the whole file into memory. Seconds rounded to 1e-6 (can produce second = 1000000 µs). Probably mis-parses v2 event epochs (flag ≥ 2, `parse_rinex.py` ~123–141). Corrections approximate |
+| `squidy/` | `math.md` formulas; MP, ROTI, slip-detection lessons; pseudorange sanity gates; troposphere; FTPS fetcher | GPS only. Reads the whole file into memory. Seconds rounded to 1e-6 (can produce second = 1000000 µs). Probably mis-parses v2 event epochs (flag ≥ 2, `parse_rinex.py` ~123–141). Corrections approximate. Its slip detector gives up small slips on purpose (`math.md`), so its 2–25 slips per day is no gate |
 | `customkf/rinex.py`, `broadcast.py` | Fail-closed streaming ideas; the GLONASS 4/5-line nav switch (~line 212); GPS LNAV equations | GPS only; a 10,000-epoch cap; GPS-time check only; rejects Hatanaka |
 | `customkf/bkg_fetch.py` | The BKG URL layout (`obs/YYYY/DDD`, `BRDC/YYYY/DDD`, `products/<week>`) | Calls curl and CRX2RNX through `subprocess`; imports modules that weren't copied |
 | `nav2sp3/` | Ephemeris selection rules (nearest TOE, IODE tie-break, health) | **GPS RINEX 2 nav only** |
 | `converter_prototype/211to305rinex.py` | A list of pitfalls | GPS only, naive code map, no continuation lines, no event flags. **Not a base to build on** |
-| `tools/rnxcmp-4.2.0/CRX2RNX.exe` | The dev oracle for CRX decoding (it supports CRINEX 3.1) | Dev-only. There is no RNX2CRX.exe here; download it from the same GSI zip (see M1). The `specs/hatanaka/` source is for reading, not building |
+| `tools/rnxcmp-4.2.0/CRX2RNX.exe` | The dev oracle for CRX decoding (it supports CRINEX 3.1) | Dev-only. RNX2CRX.exe came later from the same GSI zip (`tools/oracles/ORACLES.md`). The `specs/hatanaka/` source is for reading, not building |

@@ -224,3 +224,18 @@ Evidence at the end: unit suite 1,108 passed, 27 skipped, 13 xfailed; whole-corp
 conversions x outputs, reports, refusals) identical between the original code and the final code; the corpus
 run on the final code (corpus_opt) identical to corpus_r41 in every field of all 5,280 rows; whole
 conversions 1.7-1.9x faster (obs and large nav files), 1.25-1.3x on small files.
+
+## rinexqc plan (PLAN.md revision 4) — Codex Sol 6.1 (xhigh) and Opus, 2026-11-06
+
+The user: "re reveiw it with sol on xhigh and an opus agent see if we can get to the 9/10. do up to 3 rounds".
+The QC part of the plan (§5, §6, §7 Q rows) dated from 2026-10-30, before any code; its last scores were
+Sonnet 8 and Astra 7, with revision 3 never re-scored.
+
+| Round | Sol | Opus | What it found (all fixed in PLAN.md revision 4) |
+|---|---|---|---|
+| 1 | 7 | 6 | No observation-semantics contract (version-dependent LLI, wavelength factor, SNR units, flags) and no frequency/pair table; slip, MP and ionosphere claims beyond what the data show; clock steering and drift inferred from observations alone; Q1 gates unmeasurable and teqc unavailable; no rinexqc architecture, schema, memory budget or offline rule; completeness denominators; orbit, SPP and SISRE conventions per message type; validation independence |
+| 2 | 8 | 8, confident | Semantics rows (wavelength factor is ambiguity spacing; LLI bit 2 from 3.01; header records after flags 2-5; 3.00 alignment unknown); version invariance needs a table of legitimate changes; no 1 Hz detection guarantee; TGD on the GPS ionosphere-free clock; completeness with unknowns and SP3 alone; whole-day GEO arcs; sensitivity tests that could not fail |
+| 3 | 8 | 8, confident ("9 once B1 fixed") | Milestone rows still carried round-1 gates; compliance needs the validator, not the reader; RINEX GLO time tags are UTC hours (rinex_4.02.txt §4.1.2); completeness bounds wrong when unknown trials were observed; GLONASS channels per epoch; lenient reads keep each status |
+
+Round 3's items were fixed after the round (the user's limit was three rounds), and have not been
+re-scored. Open for the user: decisions D1-D5 in PLAN.md §5.10.

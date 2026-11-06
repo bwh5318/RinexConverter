@@ -25,9 +25,11 @@ since: newer decisions in `docs/DECISIONS.md` win over the plan where they diffe
   changed (`tools/digest_outputs.py`: 13,915 corpus conversions identical to the original code); Codex
   Sol 6.1 xhigh 9/10, confident. Suite 1,108 passed. A change to a fast path must keep its fallback and
   pass a `--compare` of two digest runs (docs/DECISIONS.md, "speed work").
-- **rinexqc is not started.** Next: milestone **Q1** (PLAN §7: tier A + JSON + text summary, nav
-  and met QC basics). `rinexcore/cddis.py` (PLAN §6) is not built yet either; the working Earthdata
-  client is in `tools/build_corpus.py`. Tier B/C need it.
+- **rinexqc is not started.** Its plan is PLAN.md revision 4 (§3.9, §5, Q milestones; reviewed by
+  Codex Sol 6.1 xhigh and Opus, 2026-11-06). Next: **Q0a** (`docs/QC_METRICS.md` v0, the schema, the
+  invariance table, Q1's gates, and the user's decisions D1-D5 of PLAN §5.10) and **Q0b**
+  (`rinexcore/cddis.py`, corpus additions, Anubis and RTKLIB), then Q1. The working Earthdata client
+  is in `tools/build_corpus.py`.
 
 ## Non-negotiable rules
 
@@ -36,7 +38,8 @@ since: newer decisions in `docs/DECISIONS.md` win over the plan where they diffe
    **not** allowed, even if it's installed (pypdf and pypdfium2 are, and must not be used).
    If you think you need something Anaconda lacks, stop and ask the user. Which module may
    import what is set out in PLAN §0: the core is stdlib only; `requests` only in
-   `rinexcore/cddis.py` and `tools/`; numpy, scipy and plotly only in `rinexqc`. An AST
+   `rinexcore/cddis.py` and `tools/`; numpy, scipy, matplotlib, plotly and jinja2 only in `rinexqc`
+   (which never imports rinexconv: PLAN §3.9). An AST
    import-purity test enforces this.
 2. **Outside programs are dev-only oracles.** CRX2RNX, RNX2CRX, gfzrnx, RTKLIB, teqc and Anubis
    may be run by tests to cross-check, and never by shipped code (no `subprocess` in

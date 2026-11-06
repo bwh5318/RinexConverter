@@ -3,6 +3,22 @@
 Newest first. Each entry says what was decided, why, and whether the user still has to
 confirm it. "Verified" means checked by a test or a corpus run; "assumed" means not yet.
 
+## 2026-11-06 — rinexqc plan, revision 4
+
+The user asked for the QC plan to be re-reviewed by Codex Sol 6.1 (xhigh) and an Opus agent, up to three
+rounds, aiming at 9/10 (docs/REVIEW_LOG.md). PLAN.md revision 4 replaces the QC parts: §3.9 (rinexqc's
+architecture: imports rinexcore, never rinexconv; one pass with explicitly bounded state; the validator as
+its own pass; resource targets set before Q1), §5 (the QC contract, the semantics adapter with cited rows,
+the frequency and pair table, obs/nav/met QC by input, completeness with bounds, validation), the product
+table in §6, and milestones Q0a, Q0b and Q1-Q6. Every factual claim the reviewers made and every citation
+the new text uses was checked against `specs/text/`, the code or the corpus first; two of mine were wrong
+and corrected (NavIC L1 arrives in 4.01, not 4.00; 3.00's phase alignment is unknown, as §3.3 says).
+
+**Open, the user's to decide** (PLAN.md §5.10, each with a proposal): D1 what QC does with a damaged file;
+D2 downloads from files.igs.org (igs20.atx, rcvr_ant.tab, satellite metadata SINEX, site logs) and fetching
+Anubis and RTKLIB; D3 the Galileo single-frequency ionosphere model; D4 the grading profile; D5 SNR units
+when the header is silent. They are put to the user in Q0a.
+
 ## 2026-11-06 — speed work: 1.7-1.9x faster, not one byte changed
 
 The user asked: "try to optimize the speed of the conversions as much as you can. review with sol on
