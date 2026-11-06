@@ -10,6 +10,7 @@ Values are copied as text (both layouts use F14.3), so a value is never
 re-rounded except when a scale factor has to be applied for RINEX 2.
 """
 
+import operator
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -59,7 +60,8 @@ def _sampling(times):
     None with fewer than two epochs."""
     diffs = {}
     for a, b in zip(times, times[1:]):
-        dt = _tdiff(a, b)
+        # (within one minute _tdiff is the seconds' difference: no datetime arithmetic needed)
+        dt = b[5] - a[5] if a[:5] == b[:5] else _tdiff(a, b)
         if dt > 0:
             diffs[dt] = diffs.get(dt, 0) + 1
     if not diffs:
@@ -185,7 +187,7 @@ class _ObsConverter:
         if cached is not None:
             (self.states, self.used, self.counts, self.slip_counts, self.nrec,
              self.data_systems, self.ep_info, self.sat_seen, self.wl_events, self.phase_seq,
-             self.scaled_zero, self.flag_counts, self.event_slots) = cached
+             self.scaled_zero, self.flag_counts, self.event_slots, self.field_kinds) = cached
             return
         event_slots = []     # (sat, channel) of events (flags 2-5) before the sat's first record
         ep_info = []         # (time, frozenset(systems), type-list key) of every flag 0/1 epoch
@@ -205,6 +207,20 @@ class _ObsConverter:
         # missing in a RINEX 2 target (which has no factors), so not counted there
         scale = parse_scale_factors(self.src.header) if self.slayout == "v3" else {}
         scaled_zero = {}     # (sid, sat) -> [n per index]
+        # Each record is summed up by its field mask (_field_mask: which fields hold a value,
+        # only flags, a zero, LLI bit 2), counted per distinct mask, and the per-field counts
+        # (and nrec) are made from those after the pass: a satellite's records have few
+        # distinct masks (266 in the 302,000 records of AC2300USA 2023/180), and a mask costs a
+        # few big-integer operations where the per-field loop it replaces took a Python step
+        # per field. For counts and for slips: (sid, sat) -> ({mask: n}, fields, width, the
+        # first three _masks of that many fields).
+        # A satellite whose records hold many distinct masks (damage, or a synthetic file) would
+        # keep one dict entry per mask: past _SURVEY_MASKS its masks are folded into its counts
+        # and its dict starts again (_fold_masks), so the pass's memory is bounded (Sol, xhigh
+        # review of the optimisation: 3.67 times the decoded size on such a file, not 2.38).
+        pats = ({}, {})
+        firsts = []          # (sid, sys, mask, fields) in the order each mask first occurs
+        folded = {}          # (0 counts / 1 slips, sid, sat) -> [records, kinds] folded so far
         for ep in self.src.iter_epochs():
             st = ep.types
             sid = st.key
@@ -235,24 +251,41 @@ class _ObsConverter:
             for x in ep.sats:
                 sat_seen.setdefault(x[0], set()).add(x)
             table = counts if ep.flag <= 1 else slips
+            pat = pats[0] if ep.flag <= 1 else pats[1]
             for sat, rec in zip(ep.sats, ep.data):
-                s = sat[0]
-                nrec[s] = nrec.get(s, 0) + 1
                 key = (sid, sat)
-                c = table.get(key)
-                if c is None:
-                    c = table[key] = [0] * (len(rec) // FIELD)
-                    if s not in order:
-                        order.append(s)
-                o = 0
-                for i in range(len(c)):
-                    if rec[o:o + 14].strip(_ZERO_CHARS):
-                        c[i] += 1
-                    elif rec[o + 14:o + 16].strip():
-                        k = (sid, s, i)
-                        flagonly[k] = flagonly.get(k, 0) + 1
-                    o += FIELD
+                e = pat.get(key)
+                if e is None:
+                    nf = len(rec) // FIELD
+                    table[key] = [0] * nf
+                    e = pat[key] = ({}, nf, nf * FIELD) + _masks(nf)[:3]
+                    if sat[0] not in order:
+                        order.append(sat[0])
+                pk, nf, width, keep, sel, v13 = e
+                if len(rec) == width and rec.isascii():
+                    # _field_mask, inline (the survey's inner loop)
+                    y = int.from_bytes(rec.encode("ascii").translate(_CLS), "big") & keep
+                    y |= y >> 8
+                    y |= y >> 16
+                    y |= y >> 32
+                    y |= y >> 48
+                    y &= sel
+                    vbit = y & v13
+                    y &= ~((vbit << 2) | (vbit >> 15))
+                else:
+                    y = _field_mask(rec, nf)
+                n = pk.get(y)
+                if n is None:
+                    pk[y] = 1
+                    firsts.append((sid, sat[0], y, nf))
+                    if len(pk) > _SURVEY_MASKS:
+                        _fold_masks(pk, table[key], sid, sat[0], firsts, flagonly,
+                                    folded.setdefault((0 if ep.flag <= 1 else 1, sid, sat), [0, 0]))
+                else:
+                    pk[y] = n + 1
                 if scale and ep.flag <= 1:
+                    s = sat[0]
+                    c = table[key]
                     codes = st.codes(s)
                     for i in range(min(len(c), len(codes))):
                         fac = scale.get((s, codes[i])) or scale.get((s, "*"))
@@ -266,6 +299,29 @@ class _ObsConverter:
                         if q == 0:
                             z = scaled_zero.setdefault(key, [0] * len(c))
                             z[i] += 1
+        # the per-field counts from the masks. flagonly's keys first, in the order the per-field
+        # loop created them (that of their first field: the first record with a given mask is
+        # where each of its fields first occurs, so `firsts` holds them in file order)
+        _flag_keys(firsts, flagonly)
+        # (sid, sys) -> _KIND_* bits: some record of the system holds a zero value, an LLI with
+        # bit 2 set or a flag-only field (convert_epochs copies the others as they are)
+        field_kinds = {}
+        nrec.update((s, 0) for s in order)      # (in the order of each system's first record)
+        for ti, (pat, table) in enumerate(zip(pats, (counts, slips))):
+            for (sid, sat), (pk, *_) in pat.items():
+                c = table[(sid, sat)]
+                s = sat[0]
+                fn, fk = folded.get((ti, sid, sat), (0, 0))
+                nrec[s] += sum(pk.values()) + fn
+                kinds = field_kinds.get((sid, s), 0) | fk
+                for y, n in pk.items():
+                    kinds |= _mask_kinds(y, len(c))
+                    vals, fos = _mask_fields(y, len(c))
+                    for i in vals:
+                        c[i] += n
+                    for i in fos:
+                        flagonly[(sid, s, i)] += n
+                field_kinds[(sid, s)] = kinds
         if self.src.types.key not in states:
             states[self.src.types.key] = self.src.types
         used = {sid: {} for sid in states}
@@ -288,8 +344,9 @@ class _ObsConverter:
         self.scaled_zero = scaled_zero
         self.flag_counts = flagonly
         self.event_slots = event_slots
+        self.field_kinds = field_kinds
         self.src._survey = (states, used, counts, slips, nrec, order, ep_info, sat_seen, wl_events,
-                            phase_seq, scaled_zero, flagonly, event_slots)
+                            phase_seq, scaled_zero, flagonly, event_slots, field_kinds)
 
     def _has_types(self, sid, s):
         """System s has target types under source type list sid (a record with none is left
@@ -302,8 +359,14 @@ class _ObsConverter:
         output writes (of a kept system with target types under the epoch's list: Sol round
         21), or one without satellites."""
         keep = set(self.systems)
-        return [t for t, syss, sid in self.ep_info if t is not None
-                and (not syss or any(x in keep and self._has_types(sid, x) for x in syss))]
+        kept = {}            # (systems, sid) -> kept: decided once per distinct pair, not per epoch
+
+        def kept_epoch(syss, sid):
+            k = kept.get((syss, sid))
+            if k is None:
+                k = kept[(syss, sid)] = not syss or any(x in keep and self._has_types(sid, x) for x in syss)
+            return k
+        return [t for t, syss, sid in self.ep_info if t is not None and kept_epoch(syss, sid)]
 
     def source_times(self):
         """Times of every flag 0/1 epoch of the source: what its own header describes."""
@@ -553,6 +616,7 @@ class _ObsConverter:
         self._uscope = {(s, c): 0 for s, by in (getattr(self, "align_undo", None) or {}).items() for c in by}
         afac = self._align_scale(None, self.src.header) if aligning else None
         shifted = Counter()
+        plans = {}           # (sid, sys) -> _copy_plan
         for ep in self.src.iter_epochs():
             sid = ep.types.key
             tst = self.tstates[sid]
@@ -582,6 +646,9 @@ class _ObsConverter:
                 continue
             sats = []
             data = []
+            # no rule that acts on single values (alignment, wavelength factors, scale factors)
+            # is in force: a record no other rule can change is copied by its plan (_copy_plan)
+            plain = not aligning and wl is None and scale is None
             for sat, rec in zip(ep.sats, ep.data):
                 s = sat[0]
                 if s not in keep:
@@ -592,6 +659,14 @@ class _ObsConverter:
                     # value claimed obs-code-not-representable): a record with no field is no
                     # record (round 20: it was written, and the output failed its own check)
                     continue
+                if plain:
+                    plan = plans.get((sid, s))
+                    if plan is None:
+                        plan = plans[(sid, s)] = self._copy_plan(sid, s, offs, clear_b2, crx1)
+                    if plan and len(rec) == plan[0]:
+                        sats.append(sat)
+                        data.append(rec if plan[1] is None else plan[1](rec))
+                        continue
                 parts = [rec[o:o + FIELD] if o >= 0 else BLANK for o in offs]
                 for k, f in enumerate(parts):
                     # a zero value is "missing" and is written blank; only fields whose
@@ -673,6 +748,38 @@ class _ObsConverter:
                         target=lli_bit2_meaning(self.target) or "undefined")
         if dropped_empty:
             self.r.loss("epoch-emptied-by-system-removal", dropped_empty)
+
+    def _copy_plan(self, sid, s, offs, clear_b2, crx1):
+        """How convert_epochs writes a record of system s under source type list sid when no
+        rule can change a field of it: (record length, None) to copy it as it is (the target
+        columns are its own, in order), (record length, function) to join its fields in the
+        target order, one run of adjacent fields at a time, a type it lacks as a blank field;
+        or False when a record of s may hold a field a rule changes: a zero value (written
+        blank), an LLI with bit 2 set (clear_b2) or, for Compact RINEX 1.0 (crx1), flags on a
+        missing value (survey's field_kinds). Copying gives what the per-field path gives for
+        such records (it would change no field and count nothing), without a step per field."""
+        k = self.field_kinds.get((sid, s), 0)
+        if k & _KIND_ZERO or (clear_b2 and k & _KIND_B2) or (crx1 and k & _KIND_FLAGONLY):
+            return False
+        n = FIELD * len(self.states[sid].codes(s))
+        if offs == list(range(0, n, FIELD)):
+            return n, None
+        spans = []           # [start, end) in the record followed by one blank field per -1
+        pad = 0
+        for o in offs:
+            if o < 0:
+                o = n + FIELD * pad
+                pad += 1
+            if spans and spans[-1][1] == o:
+                spans[-1][1] = o + FIELD
+            else:
+                spans.append([o, o + FIELD])
+        blanks = BLANK * pad
+        if len(spans) == 1:
+            a, b = spans[0]
+            return n, ((lambda rec: (rec + blanks)[a:b]) if pad else (lambda rec: rec[a:b]))
+        get = operator.itemgetter(*[slice(a, b) for a, b in spans])
+        return n, ((lambda rec: "".join(get(rec + blanks))) if pad else (lambda rec: "".join(get(rec))))
 
     def _align_scale(self, cur, records):
         """The scale factors in force for --align-phases, keyed by source code: the header's,
@@ -2227,6 +2334,112 @@ class _ObsConverter:
 
 TIME_SYSTEMS = {"GPS", "GLO", "GAL", "BDT", "QZS", "IRN", "UTC", "TAI"}
 _CLEAR_B2 = {"4": "0", "5": "1", "6": "2", "7": "3"}
+
+
+# -- field masks (survey) ----------------------------------------------------------------------
+# A record's fields summed up in one integer, so that the survey takes a few big-integer steps
+# per record instead of a Python step per field. Each character becomes a class byte; masks
+# keep each class only in its columns; an OR-fold then gathers a field's columns into one byte.
+_MV = 0x01        # columns 0-13: a character other than _ZERO_CHARS (the value is not missing)
+_MF = 0x02        # columns 14-15: a character that is not whitespace (an LLI or SSI is set)
+_MZ = 0x04        # column 13: '0' or '.' (a missing value convert_epochs writes blank: a zero)
+_MB = 0x08        # column 14: '4'-'7' (LLI bit 2 set: convert_epochs' clear_b2)
+_KIND_ZERO, _KIND_B2, _KIND_FLAGONLY = 1, 2, 4     # survey's field_kinds
+
+
+def _char_class(ch):
+    return ((ch not in _ZERO_CHARS) * _MV | (not ch.isspace()) * _MF | (ch in "0.") * _MZ
+            | (ch in "4567") * _MB)
+
+
+_CLS = bytes(_char_class(chr(c)) for c in range(256))
+_MASKS = {}
+
+
+def _masks(n):
+    """(keep, select, value bit, zero bits, LLI-bit-2 bits, flag bits) for records of n fields."""
+    m = _MASKS.get(n)
+    if m is None:
+        def per_field(*b):
+            return int.from_bytes(bytes(b) * n, "big")
+        z13 = (0,) * 13
+        m = _MASKS[n] = (per_field(*(_MV,) * 13, _MV | _MZ, _MF | _MB, _MF),
+                         per_field(*z13, _MV | _MZ, _MB, _MF), per_field(*z13, _MV, 0, 0),
+                         per_field(*z13, _MZ, 0, 0), per_field(*z13, 0, _MB, 0),
+                         per_field(*z13, 0, 0, _MF))
+    return m
+
+
+def _field_mask(rec, n):
+    """The first n fields of a record (a short one read as padded with blanks, which have no
+    class) as one integer of 16 bytes per field, big-endian. Of each field, byte 13 holds _MV
+    when its value is not missing (rec[o:o+14].strip(_ZERO_CHARS)), else _MZ when column 13
+    is '0' or '.'; byte 14 _MB when its LLI is 4-7; byte 15 _MF when its value is missing and
+    its LLI or SSI is not whitespace (rec[o+14:o+16].strip(): a flag-only field)."""
+    if len(rec) != n * FIELD:
+        rec = rec[:n * FIELD].ljust(n * FIELD)
+    try:
+        b = rec.encode("latin-1").translate(_CLS)
+    except UnicodeEncodeError:
+        b = bytes(_char_class(ch) for ch in rec)
+    keep, sel, v13 = _masks(n)[:3]
+    y = int.from_bytes(b, "big") & keep
+    # OR-fold over 14 bytes (y >> 8 moves each byte one position on): byte p then holds the OR
+    # of bytes p-13..p, so a field's byte 13 gathers its columns 0-13, byte 14 its columns 1-14
+    # (of which only 14 keeps _MB) and byte 15 its columns 2-15 (only 14 and 15 keep _MF);
+    # nothing reaches into the next field's bytes 13-15
+    y |= y >> 8
+    y |= y >> 16
+    y |= y >> 32
+    y |= y >> 48
+    y &= sel
+    t = y & v13                            # value present: no zero (_MZ) or flag-only (_MF) then
+    return y & ~((t << 2) | (t >> 15))     # (byte 13 bit 0 -> byte 13 bit 2, byte 15 bit 1)
+
+
+def _mask_fields(y, n):
+    """([fields holding a value], [flag-only fields]) of a _field_mask of n fields."""
+    b = y.to_bytes(n * FIELD, "big")
+    return ([i for i in range(n) if b[FIELD * i + 13] & _MV],
+            [i for i in range(n) if b[FIELD * i + 15] & _MF])
+
+
+def _mask_kinds(y, n):
+    """_KIND_* bits of a _field_mask of n fields."""
+    m = _masks(n)
+    return (_KIND_ZERO if y & m[3] else 0) | (_KIND_B2 if y & m[4] else 0) | (_KIND_FLAGONLY if y & m[5] else 0)
+
+
+_SURVEY_MASKS = 64    # distinct masks the survey keeps per (type list, satellite) before folding them
+
+
+def _flag_keys(firsts, flagonly):
+    """Create survey's flag-only keys (sid, sys, field) of the masks in `firsts`, in its order (that
+    of each mask's first record: the order the per-field loop created them), and empty it. A
+    mask without flag bits (_masks(n)[5], the bits _mask_fields' second list reads) has none."""
+    for sid, s, y, nf in firsts:
+        if y & _masks(nf)[5]:
+            for i in _mask_fields(y, nf)[1]:
+                flagonly.setdefault((sid, s, i), 0)
+    firsts.clear()
+
+
+def _fold_masks(pk, c, sid, s, firsts, flagonly, acc):
+    """Add a satellite's mask counts `pk` to its per-field counts `c` and to `flagonly`, its
+    records and _KIND_* bits to `acc` ([records, kinds], read after the pass), and empty `pk`.
+    The pending first occurrences of every satellite are made keys first, so flagonly keeps
+    its order; the counts are sums, which the order of folding does not change."""
+    _flag_keys(firsts, flagonly)
+    n_f = len(c)
+    for y, n in pk.items():
+        acc[0] += n
+        acc[1] |= _mask_kinds(y, n_f)
+        vals, fos = _mask_fields(y, n_f)
+        for i in vals:
+            c[i] += n
+        for i in fos:
+            flagonly[(sid, s, i)] += n
+    pk.clear()
 
 
 def codemap_codes(version, system):

@@ -51,6 +51,8 @@ Standard library only (PLAN.md section 0).
 
 import datetime
 import re
+from bisect import bisect_right
+from itertools import accumulate
 
 from rinexcore.errors import CorruptError
 from rinexcore.rinexfile import sniff
@@ -249,19 +251,30 @@ class _Out:
 # ---------------------------------------------------------------------------
 class _Reader:
     """Lines of a payload, decoded latin-1 a chunk at a time (CR before LF dropped).
-    `n` is the 1-based number of the last line returned."""
+    `n` is the 1-based number of the last line returned.
 
-    __slots__ = ("_it", "n", "_back")
+    After screen_fields(off), every chunk is also screened at once for the observation-field
+    layout (_fields_bad, a speed-up of the per-line _OBS_FIELDS check): line numbers
+    `lo`..`hi` are screened, and `bad` holds those of them whose text from column off+1 on
+    _OBS_FIELDS might reject. A line screened and not bad is accepted by _OBS_FIELDS, and so
+    is any prefix of it cut after a whole 16-column field."""
+
+    __slots__ = ("_chunks", "_lines", "_i", "n", "_back", "_off", "lo", "hi", "bad")
 
     CHUNK = 1 << 22
 
     def __init__(self, payload):
-        self._it = self._lines(payload)
+        self._chunks = self._split(payload)
+        self._lines = []
+        self._i = 0
         self.n = 0
         self._back = None
+        self._off = None
+        self.lo, self.hi, self.bad = 1, 0, frozenset()     # nothing screened
 
     @classmethod
-    def _lines(cls, p):
+    def _split(cls, p):
+        """The payload's lines, one list per chunk of about CHUNK bytes (cut after a LF)."""
         pos = 0
         n = len(p)
         while pos < n:
@@ -278,7 +291,7 @@ class _Reader:
             parts = text.split("\n")
             if parts[-1] == "":
                 parts.pop()
-            yield from parts
+            yield parts
 
     def next(self):
         if self._back is not None:
@@ -286,15 +299,53 @@ class _Reader:
             self._back = None
             self.n += 1
             return line
-        line = next(self._it, None)
-        if line is not None:
-            self.n += 1
-        return line
+        i = self._i
+        lines = self._lines
+        while i >= len(lines):              # (a chunk is never empty; the loop is a guard)
+            lines = next(self._chunks, None)
+            if lines is None:
+                return None
+            self._lines = lines
+            self._i = i = 0
+            if self._off is not None:
+                self._screen(0)
+        self._i = i + 1
+        self.n += 1
+        return lines[i]
 
     def back(self, line):
         """Return `line` to the reader (one line of look-ahead)."""
         self._back = line
         self.n -= 1
+
+    def take(self, k):
+        """The next k lines as a new list, numbered n - k + 1 .. n afterwards, when all of them
+        are in the current chunk and no line is pushed back; else None (nothing read)."""
+        i = self._i
+        j = i + k
+        if j > len(self._lines) or self._back is not None:
+            return None
+        self._i = j
+        self.n += k
+        return self._lines[i:j]
+
+    def untake(self, k):
+        """Undo take(k): the k lines are read again (by next() or take())."""
+        self._i -= k
+        self.n -= k
+
+    def screen_fields(self, off):
+        """Screen the rest of the current chunk and every later chunk (see the class doc)."""
+        self._off = off
+        # the next line returned is number n + 1: the pushed-back line (the chunk's line
+        # _i - 1) if there is one, else the chunk's line _i
+        self._screen(self._i - (self._back is not None))
+
+    def _screen(self, start):
+        first = self.n + 1
+        self.lo = first
+        self.hi = first + len(self._lines) - start - 1
+        self.bad = _fields_bad(self._lines, start, self._off, first)
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +745,96 @@ _VALUE_LENIENT = re.compile(r" *[+-]?(?:\d+\.?\d*|\.\d+) *").fullmatch     # wha
 # digit columns of an F14.3 value (point at offset 10), and a byte map 1-9 -> 1, else 0
 _DIGIT_OFFSETS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13)
 _NONZERO = bytes(1 if 0x31 <= c <= 0x39 else 0 for c in range(256))
+
+
+# _OBS_FIELDS for a whole chunk at once (_fields_bad). Padded with blanks to a multiple of 16
+# columns, a text is accepted exactly when every 16-column field c0..c15 is: c0-c9 blanks,
+# then optionally '-' or a digit followed only by digits (the regex's lookahead); c10 '.'
+# with c11-c13 digits, or c0-c13 all blank; c14 blank or 0-7 (LLI); c15 blank or a digit
+# (SSI). (The padding changes nothing: the regex's tail is 0-13 blanks, F14 or F14 + LLI,
+# which are the padded fields that hold only blanks, F14 + '  ' and F14 + LLI + ' '.) Each
+# rule constrains one character and its right-hand neighbour, so it is a table of
+# (column class, code of c[p], code of c[p+1]) -> bad. Codes: 0 blank, 1 digit 0-7,
+# 2 digit 8-9, 3 '-', 4 '.', 5 anything else ('\d' matches only 0-9 in latin-1 text).
+_FCODE = bytes(0 if c == 32 else 1 if 48 <= c <= 55 else 2 if c in (56, 57) else 3 if c == 45
+               else 4 if c == 46 else 5 for c in range(256))
+
+
+def _pair_bad(cls, a, b):
+    dig = (1, 2)
+    if cls == 0:            # c0-c8 -> next: in ' -0-9'; after a non-blank only digits
+        return a > 3 or (a != 0 and b not in dig)
+    if cls == 1:            # c9 -> c10: c9 in ' -0-9'; c10 '.' or blank, '.' after a non-blank
+        return a > 3 or b not in (0, 4) or (a != 0 and b != 4)
+    if cls == 2:            # c10 -> c11: '.' + digit, or blank + blank
+        return a not in (0, 4) or b not in (0, 1, 2) or (a == 4) != (b in dig)
+    if cls == 3:            # c11 -> c12, c12 -> c13: all digits or all blanks
+        return b not in (0, 1, 2) or (a in dig) != (b in dig)
+    if cls == 4:            # c13 -> c14 (LLI): blank or 0-7
+        return b not in (0, 1)
+    if cls == 5:            # c14 -> c15 (SSI): blank or a digit
+        return b not in (0, 1, 2)
+    return False            # c15 -> the next field's c0
+
+
+_FCLASS = (0,) * 9 + (1, 2, 3, 3, 4, 5, 6)                 # class of each column of a field
+_FPOS_ROW = bytes(36 * c for c in _FCLASS)                 # lane offsets 36 * class
+_FPAIR = bytes(1 if v < 252 and _pair_bad(v // 36, v % 36 // 6, v % 6) else 0 for v in range(256))
+_FPOS = [(0, 0)]            # cache: [(bytes, int of _FPOS_ROW repeated)], replaced whole
+_SCREEN_LINES = 1024        # lines screened at once: bounds the temporaries (about 8x the block)
+_SCREEN_MAX = 4096          # longer lines are not screened (an obs record of 255 types is 4083)
+
+
+def _fpos(n):
+    """int.from_bytes(_FPOS_ROW * (n // 16), 'big'), cached for the largest n (up to 2 MB)."""
+    m, v = _FPOS[0]
+    if n <= m:
+        return v >> (8 * (m - n))            # drop whole 16-byte rows: the same pattern, shorter
+    v = int.from_bytes(_FPOS_ROW * (n >> 4), "big")
+    if n <= 1 << 21:
+        _FPOS[0] = (n, v)
+    return v
+
+
+def _fields_bad(lines, start, off, first):
+    """Line numbers (lines[start] being number `first`) of the lines whose text from column
+    off+1 on _OBS_FIELDS might reject; for every other line it accepts that text, and any
+    prefix of it cut after a whole field.
+
+    In blocks of _SCREEN_LINES lines, the texts are padded to whole fields and joined, and
+    each byte is mapped to its code (_FCODE) as one big-endian integer x. One lane (byte) per
+    column then holds, in 262 * x + _fpos = 6 * x + (x << 8) + _fpos, the value 36 * class +
+    6 * code(c[p]) + code(c[p+1]) (at most 6 * 36 + 6 * 5 + 5 = 251, so no lane carries into
+    the next), and _FPAIR marks the bad values. This replaces a regular-expression match per
+    line by a few passes over the block in C (about 2.5x faster); a line flagged here is
+    checked again with _OBS_FIELDS."""
+    bad = set()
+    for s in range(start, len(lines), _SCREEN_LINES):
+        block = lines[s:s + _SCREEN_LINES]
+        line0 = first + s - start
+        if max(map(len, block)) > _SCREEN_MAX:
+            # a very long line (damage, such as CR-only line ends) is left to _OBS_FIELDS,
+            # so that the temporaries stay a few times the block
+            bad.update(line0 + k for k, x in enumerate(block) if len(x) > _SCREEN_MAX)
+            block = [x if len(x) <= _SCREEN_MAX else "" for x in block]
+        pad = [x[off:].ljust((len(x) - off + 15) & -16) for x in block]
+        buf = "".join(pad).encode("latin-1")
+        n = len(buf)
+        if not n:
+            continue
+        x = int.from_bytes(buf.translate(_FCODE), "big")
+        # byte p + 1 of the n + 1 bytes is the pair (c[p], c[p+1]); byte 0 (code of c[0]
+        # alone, class 0, left code 0) is never bad
+        r = (x * 262 + _fpos(n)).to_bytes(n + 1, "big").translate(_FPAIR)
+        j = r.find(1)
+        if j < 0:
+            continue
+        ends = list(accumulate(map(len, pad)))
+        while j >= 0:
+            k = bisect_right(ends, j - 1)    # the line holding column j - 1 of the buffer
+            bad.add(line0 + k)
+            j = r.find(1, ends[k] + 1)
+    return bad
 
 # epoch records: rinex211.txt Table A2 l.1229 (1X,I2.2,4(1X,I2),F11.7,2X,I1,I3,12(A1,I2),F12.9);
 # rinex305.txt Table A3 p.59 / rinex_4.02.txt Table A3 p.69 ('>',1X,I4,4(1X,I2.2),F11.7,2X,I1,I3,
@@ -1110,6 +1251,7 @@ class _Obs:
         dcache = [None]
         count = self.count_obs
         sats_all = self.sats
+        rd.screen_fields(3)        # the satellite records' fields, a chunk at a time
         while True:
             line = nxt()
             if line is None:
@@ -1211,11 +1353,13 @@ class _Obs:
                         out.err("VAL.OBS.DATA.EXTRA", f"{sat}: more observation fields than the "
                                 f"{w // 16} types of SYS / # / OBS TYPES", rd.n, 4 + w)
                     body = body[:w]
-                if fields_ok(body):
+                n = rd.n
+                # screened and not flagged: _OBS_FIELDS accepts it (_Reader.screen_fields)
+                if (rd.lo <= n <= rd.hi and n not in rd.bad) or fields_ok(body):
                     if counting:
                         self.count_body(sat, state[s], body, w)
                 else:
-                    self.fields_slow(body, rd.n, 4)
+                    self.fields_slow(body, n, 4)
                     if counting:
                         self.count_exact(sat, state[s], body.ljust(w), w // 16)
             if flag <= 1 or flag == 6:
@@ -1349,6 +1493,8 @@ class _Obs:
         count = self.count_obs
         pure_gps = self.info.system.strip() in ("", "G")
         idmap = {}
+        take = rd.take
+        rd.screen_fields(0)        # the observation lines' fields, a chunk at a time
         while True:
             line = nxt()
             if line is None:
@@ -1475,7 +1621,25 @@ class _Obs:
             counting = count and flag <= 1
             seen = set()
             for sat in ids:
-                rec_lines = []
+                keep = counting and sat
+                xs = take(nl)
+                if xs is not None:
+                    n1 = rd.n
+                    if rd.lo <= n1 - nl + 1 and n1 <= rd.hi and rd.bad.isdisjoint(range(n1 - nl + 1, n1 + 1)) \
+                            and len(xs[-1]) <= last_w and (nl == 1 or max(map(len, xs[:-1])) <= 80):
+                        # the whole record at once: every line screened (not flagged) and within
+                        # its columns, so the line loop below would report nothing
+                        if sat:
+                            if sat in seen:
+                                out.err("VAL.OBS.DATA.DUPLICATE-SAT", f"{sat} appears twice in the epoch "
+                                        f"at line {lineno}", lineno, 33)
+                            seen.add(sat)
+                            if counting:
+                                self.count_body(sat, state, "".join([x.ljust(80) for x in xs])[:width], width)
+                        continue
+                    rd.untake(nl)          # diagnose line by line
+                parts = []
+                good = True
                 for j in range(nl):
                     x = nxt()
                     if x is None:
@@ -1490,11 +1654,14 @@ class _Obs:
                             out.err("VAL.OBS.DATA.EXTRA", f"{sat or '?'}: more observation fields than "
                                     f"the {ntypes} types of # / TYPES OF OBSERV (5 per line)", xn, lim + 1)
                         x = x[:lim]
-                    if not fields_ok(x):
+                    # screened and not flagged: _OBS_FIELDS accepts it (_Reader.screen_fields)
+                    if not ((rd.lo <= xn <= rd.hi and xn not in rd.bad) or fields_ok(x)):
                         self.fields_slow(x, xn, 1)
-                        rec_lines.append((x, False))
-                    else:
-                        rec_lines.append((x, True))
+                        good = False
+                    if keep:
+                        # each line padded to its 80 columns (the last to its last_w): joined,
+                        # the record's `width` columns, as the counters need them
+                        parts.append(x.ljust(lim))
                 if not sat:
                     continue
                 if sat in seen:
@@ -1502,11 +1669,11 @@ class _Obs:
                             f"{lineno}", lineno, 33)
                 seen.add(sat)
                 if counting:
-                    body = "".join(x.ljust(80) for x, _ in rec_lines)[:width]
-                    if all(ok for _, ok in rec_lines):
+                    body = "".join(parts)
+                    if good:
                         self.count_body(sat, state, body, width)
                     else:
-                        self.count_exact(sat, state, body.ljust(width), ntypes)
+                        self.count_exact(sat, state, body, ntypes)
             if flag <= 1 or flag == 6:
                 self.sats.update(seen)
                 self.data_systems.update(x[0] for x in seen)
@@ -1928,7 +2095,7 @@ def _glo_tk_day(line):
     if not m or not line[61:80].strip():
         return False
     try:
-        v = float(re.sub(r"[DdEe]", "E", line[61:80].strip()))
+        v = float(_EXP_LETTER.sub("E", line[61:80].strip()))
         t = datetime.datetime(int(line[4:8]), int(line[9:11]), int(line[12:14]))
         sod = int(line[15:17]) * 3600 + int(line[18:20]) * 60 + int(line[21:23])
     except ValueError:
@@ -1949,6 +2116,23 @@ _NAV_LENIENT = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:([DdEe])([+-]?)(\d+))?").
 _V2_NAV_HEAD = re.compile(r"[ \d]\d \d\d [ \d]\d [ \d]\d [ \d]\d [ \d]\d[ \d]{2}\d\.\d").match
 _V3_NAV_HEAD = re.compile(r"[A-Z]\d\d \d{4} \d\d \d\d \d\d \d\d \d\d").match
 _V4_EPOCH = re.compile(r"    \d{4} \d\d \d\d \d\d \d\d \d\d").match
+_V2_NAV_EPOCH_FIELDS = re.compile(r"[ \d]\d [ \d]\d [ \d]\d [ \d]\d [ \d]\d [ \d]\d").fullmatch
+_V4_MSG = re.compile(r"[A-Z0-9]{2,4} *").fullmatch
+_V4_SUB = re.compile(r"[A-Z0-9]* *").fullmatch
+_EXP_LETTER = re.compile(r"[DdEe]")
+_NAV_FAST = {}
+
+
+def _nav_fast(letters):
+    """match(line, a) of as many 19-column fields from column a + 1 on (up to 4) as are blank
+    or a number in one of the two canonical D19.12 shapes ('-1.234567890123D+05', '  .123...',
+    ' -.123...') whose exponent letter is one of `letters`. Each such field, stripped, is a
+    _NAV_TOKEN with that letter, so _Nav.numbers reports nothing for it."""
+    m = _NAV_FAST.get(letters)
+    if m is None:
+        m = _NAV_FAST[letters] = re.compile(
+            rf"(?:(?:[ -]\d| [ -])\.\d{{12}}[{letters}][+-]\d\d| {{19}}){{0,4}}").match
+    return m
 
 
 class _Nav:
@@ -1959,6 +2143,8 @@ class _Nav:
         self.tv = tv
         self.out = out
         self.letters = {}           # exponent letter -> first line
+        self.fast = None            # _nav_fast of the letters seen
+        self.spare_tables = {}      # system -> _V23_SPARE_FIELDS table of this version
 
     def run(self):
         tv = self.tv
@@ -2016,6 +2202,14 @@ class _Nav:
 
     # -- numbers -------------------------------------------------------------
     def numbers(self, line, starts, lineno):
+        fast = self.fast
+        if fast is not None:
+            # every field blank or a canonical number with a letter already seen: the loop
+            # below would report nothing and record no letter (a speed-up, _nav_fast)
+            a = starts[0]
+            e = fast(line, a).end()
+            if e == len(line) or e >= a + 19 * len(starts):
+                return
         out = self.out
         for a in starts:
             f = line[a:a + 19]
@@ -2041,6 +2235,7 @@ class _Nav:
                             lineno, a + 1)
             if letter not in self.letters:
                 self.letters[letter] = lineno
+                self.fast = _nav_fast("".join(sorted(self.letters)))
 
     def exponents(self):
         tv = self.tv
@@ -2124,7 +2319,7 @@ class _Nav:
         h = head.ljust(22)
         if h[3] == " " and h[4].isdecimal():
             out.warn("VAL.NAV.EPOCH.PAD", f"year {h[3:5]!r} not zero-padded (I2.2)", lineno, off + 4)
-        ok = (re.fullmatch(r"[ \d]\d [ \d]\d [ \d]\d [ \d]\d [ \d]\d [ \d]\d", h[0:17])
+        ok = (_V2_NAV_EPOCH_FIELDS(h[0:17])
               and _VALUE_LENIENT(h[17:22]) is not None)
         if not ok:
             out.err("VAL.NAV.EPOCH", f"PRN / EPOCH / SV CLK {h.strip()!r} unreadable "
@@ -2220,6 +2415,7 @@ class _Nav:
         body_first = False
         kind = sat = None
         fields = None
+        spare = {}
         while True:
             line = rd.next()
             if line is None or line[:1] == ">":
@@ -2240,6 +2436,7 @@ class _Nav:
                 cur = [lineno, 0, want, f"{kind} {sat} {msg}".strip()]
                 body_first = True
                 fields = _v4_fields(tv, kind, sat[:1], msg)
+                spare = self.spare_fields(cur[3])          # once per record, not per line
                 continue
             if cur is None:
                 out.err("VAL.NAV.RECORD.START", "data line before the first '>' record header", lineno, 1)
@@ -2261,7 +2458,7 @@ class _Nav:
                         self.epoch_slow_v3(line, lineno, 0, False)
                     if kind != "STO":
                         self.numbers(line, (23, 42, 61), lineno)
-                self.fields(line, lineno, 0, 23, fields, cur[3])
+                self.fields(line, lineno, 0, 23, fields, cur[3], spare)
                 self.layout(line, 80, lineno)
                 continue
             if line[0:4].strip():
@@ -2269,36 +2466,45 @@ class _Nav:
                         "line nor a '>' record header", lineno, 1)
                 continue
             self.numbers(line, (4, 23, 42, 61), lineno)
-            self.fields(line, lineno, cur[1] - 1, 4, fields, cur[3])
+            self.fields(line, lineno, cur[1] - 1, 4, fields, cur[3], spare)
             self.layout(line, 80, lineno)
 
     def spares23(self, line, lineno, s, k, start):
         """A non-zero value in a spare field of a RINEX 2/3 record line k (_V23_SPARE_FIELDS)
         is noted (one VAL.NAV.SPARE warning per file). Zero is not: before 3.05 the tables say
         only 'spare', and 3.05 'recommended to be left blank' (rinex305.txt section 6.4 p.42)."""
-        tv = self.tv
-        table = _V23_SPARE_FIELDS.get(s, {})
-        if s == "S" and tv < "2.11":
-            table = {3: (3,)}
-        elif s == "J" and tv < "3.03":
-            table = {**table, 5: (3,)}
+        table = self.spare_tables.get(s)
+        if table is None:            # once per system (the version is fixed)
+            tv = self.tv
+            table = _V23_SPARE_FIELDS.get(s, {})
+            if s == "S" and tv < "2.11":
+                table = {3: (3,)}
+            elif s == "J" and tv < "3.03":
+                table = {**table, 5: (3,)}
+            self.spare_tables[s] = table
         for j in table.get(k, ()):
             t = line[start + 19 * j:start + 19 * (j + 1)].strip()
             if t and _NAV_LENIENT(t):
                 try:
-                    if float(re.sub(r"[DdEe]", "E", t)) != 0:
+                    if float(_EXP_LETTER.sub("E", t)) != 0:
                         self.spares.append(lineno)
                 except ValueError:
                     pass
 
-    def fields(self, line, lineno, k, start, fields, label):
-        """No value after the last field line k of a RINEX 4 record defines (_v4_fields), and
-        none in its spare fields (_V4_SPARE_FIELDS: noted, one warning per file)."""
+    @staticmethod
+    def spare_fields(label):
+        """The _V4_SPARE_FIELDS entry ({line: field indexes}) of a record labelled 'EPH G01 LNAV'."""
         t = label.split()
         key = (t[0], t[1][:1], t[2]) if len(t) >= 3 else None
         if t and t[0] == "EOP":
             key = ("EOP",)
-        for j in _V4_SPARE_FIELDS.get(key, {}).get(k, ()):
+        return _V4_SPARE_FIELDS.get(key, {})
+
+    def fields(self, line, lineno, k, start, fields, label, spare):
+        """No value after the last field line k of a RINEX 4 record defines (_v4_fields), and
+        none in its spare fields (`spare`, the record's spare_fields: noted, one warning per
+        file)."""
+        for j in spare.get(k, ()):
             a = start + 19 * j
             if line[a:a + 19].strip():
                 self.spares.append(lineno)
@@ -2323,8 +2529,8 @@ class _Nav:
         ok = (x[1] == " " and x[5] == " " and x[9] == " " and x[14] == " " and not x[19:].strip()
               and kind in ("EPH", "STO", "EOP", "ION") and s.isalpha() and s.isupper()
               and (prn == "  " or (prn.isdecimal() and prn.isascii()))
-              and re.fullmatch(r"[A-Z0-9]{2,4} *", x[10:14]) is not None
-              and re.fullmatch(r"[A-Z0-9]* *", x[15:19]) is not None)
+              and _V4_MSG(x[10:14]) is not None
+              and _V4_SUB(x[15:19]) is not None)
         if not ok:
             out.err("VAL.NAV.RECORD.HEAD", f"record header {line.strip()!r} is not '> TYP S## MSG "
                     "[SUB]' (A1,1X,A3,1X,A1,A2,1X,A4,1X,A4; rinex_4.02.txt Tables A9-A40)", lineno, 1)
@@ -2399,6 +2605,19 @@ _MET_E2 = re.compile(r" \d\d [ \d]\d [ \d]\d [ \d]\d [ \d]\d [ \d]\d").match
 _MET_E4 = re.compile(r" \d{4} [ \d]\d [ \d]\d [ \d]\d [ \d]\d [ \d]\d").match
 _MET_E2_PAD = re.compile(r"  \d [ \d]\d [ \d]\d [ \d]\d [ \d]\d [ \d]\d").match
 _F7_1 = re.compile(r" *-?\d*\.\d").fullmatch
+# The 7-column texts _F7_1 accepts, spelt out by the number of leading blanks (0-5) so that a
+# run of k of them is one regular expression (_met_fast): blanks, then '-' or a digit and
+# only digits up to column 5, then '.' and a digit.
+_F7_1_FIELD = r"(?:[-\d]\d{4}| (?:[-\d]\d{3}| (?:[-\d]\d\d| (?:[-\d]\d| (?:[-\d]| )))))\.\d"
+_MET_FAST = {}
+
+
+def _met_fast(k):
+    """match(line, a) of k fields from column a + 1 on that _F7_1 accepts in full (7 columns)."""
+    m = _MET_FAST.get(k)
+    if m is None:
+        m = _MET_FAST[k] = re.compile(f"(?:{_F7_1_FIELD}){{{k}}}").match
+    return m
 
 
 class _Met:
@@ -2506,14 +2725,16 @@ class _Met:
             if not line.strip():
                 out.warn("VAL.MET.BLANK-LINE", "blank line in the data section", lineno)
                 continue
-            if line[0:4] == "    " and not fast(line):
+            ok = fast(line)          # (evaluated once per version of the line)
+            if line[0:4] == "    " and not ok:
                 out.err("VAL.MET.CONTINUATION", "continuation line where an epoch was expected (more "
                         "values than # / TYPES OF OBSERV declares?)", lineno, 1)
                 continue
-            if not fast(line) and pad(line):
+            if not ok and pad(line):
                 out.warn("VAL.MET.EPOCH.PAD", f"year {line[1:3]!r} not zero-padded (I2.2)", lineno, 2)
                 line = line[:1] + "0" + line[2:]
-            if not fast(line):
+                ok = fast(line)
+            if not ok:
                 if other(line):
                     out.err("VAL.MET.EPOCH.LAYOUT", f"epoch written with a {'4' if v2 else '2'}-digit year; "
                             f"RINEX {self.tv} met epochs are {'1X,I2.2' if v2 else '1X,I4'},5(1X,I2)",
@@ -2558,6 +2779,8 @@ class _Met:
                 self.values(c, 4, k, rd.n)
 
     def values(self, line, start, k, lineno):
+        if _met_fast(k)(line, start) and not line[start + 7 * k:].strip():
+            return          # all k values F7.1, nothing after them: nothing to report
         out = self.out
         for j in range(k):
             a = start + 7 * j

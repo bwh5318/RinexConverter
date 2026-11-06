@@ -12,6 +12,7 @@ reads, with one extra copy.
 import tempfile
 
 SPILL_BYTES = 64 << 20
+WRITE_BYTES = 1 << 20          # once spilled, small pieces are written this many at a time
 
 
 class Spool:
@@ -19,6 +20,8 @@ class Spool:
         self._pieces = []
         self._size = 0
         self._file = None
+        self._wbuf = []            # pieces not yet written to the file (spilled), < WRITE_BYTES
+        self._wsize = 0
 
     def append(self, piece):
         if not piece:
@@ -26,13 +29,32 @@ class Spool:
         self._size += len(piece)
         if self._file is None and self._size > SPILL_BYTES:
             self._file = tempfile.TemporaryFile(buffering=0)
-            for p in self._pieces:
-                self._file.write(p)
-            self._pieces = []
+            pieces, self._pieces = self._pieces, []
+            for p in pieces:
+                self._write(p)
         if self._file is None:
             self._pieces.append(piece)
         else:
+            self._write(piece)
+
+    def _write(self, piece):
+        """Write to the file, small pieces gathered to about WRITE_BYTES first (the file is
+        unbuffered: a write per piece was a system call per hatanaka epoch, 5,800 for a 90 MB
+        file); the bytes and their order are those of a write per piece."""
+        if len(piece) >= WRITE_BYTES:
+            self._flush()
             self._file.write(piece)
+            return
+        self._wbuf.append(piece)
+        self._wsize += len(piece)
+        if self._wsize >= WRITE_BYTES:
+            self._flush()
+
+    def _flush(self):
+        if self._wbuf:
+            self._file.write(b"".join(self._wbuf))
+            self._wbuf = []
+            self._wsize = 0
 
     def __len__(self):
         return self._size
@@ -43,6 +65,7 @@ class Spool:
             out = b"".join(self._pieces)
             self._pieces = []
             return out
+        self._flush()
         f, self._file = self._file, None
         try:
             f.seek(0)
@@ -65,6 +88,7 @@ class Spool:
             self._file.close()
             self._file = None
         self._pieces = []
+        self._wbuf = []
 
 
 def join_bytes(pieces):

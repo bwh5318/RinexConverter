@@ -6,6 +6,8 @@ Values: mF7.1, 8 on the epoch line, continuation lines 4X,10F7.1.
 Values are kept as their 7-character text fields.
 """
 
+import datetime
+import re
 from decimal import Decimal, InvalidOperation
 
 from .errors import CorruptError
@@ -72,6 +74,14 @@ def _int(s, what, lineno, col):
     return int(t)
 
 
+# Speed (read_met runs twice per conversion: input, and the output check): epoch fields in their
+# usual form (ASCII digits; a 2-digit field blank-padded on the left) are read by one match,
+# whose int() of a field is what _int gives; any other form goes through _int, which reads or
+# refuses it as before. The 1X separator columns are not read, by either.
+_EPOCH_V2 = re.compile(r".([ 0-9][0-9])" * 6, re.S)                         # 1X,I2.2,5(1X,I2)
+_EPOCH_V3 = re.compile(r".([0-9]{4})" + r".([ 0-9][0-9])" * 5, re.S)        # 1X,I4,5(1X,I2)
+
+
 def _looks_v2_epoch(line):
     return line[1:3].strip().isdecimal() and line[3:4] == " " and line[4:6].strip().isdecimal()
 
@@ -115,11 +125,16 @@ def read_met(lines, info, eol="lf", lenient=False):
     # rinex302.txt ~4218)
     v2 = info.version < "3.02"
     head = 18 if v2 else 20
+    last = None             # index of the last non-blank line, once a blank line is met
+    good = set()            # value fields that passed the Decimal check (they repeat)
     while i < len(lines):
         line = lines[i]
         lineno = i + 1
-        if not line.strip():
-            if any(x.strip() for x in lines[i:]):
+        if not line or line.isspace():                  # (not line.strip(), without the copy)
+            if last is None:
+                # (any(x.strip() for x in lines[i:]) at every blank line was quadratic in them)
+                last = next((k for k in range(len(lines) - 1, -1, -1) if lines[k].strip()), -1)
+            if last >= i:
                 f.notes.append({"rule": "MET.BLANKLINE", "message": "blank line skipped",
                                 "line": lineno, "repair": True})
             i += 1
@@ -135,17 +150,23 @@ def read_met(lines, info, eol="lf", lenient=False):
             v2 = True
             head = 18
             line = line.ljust(head + 7 * min(n, 8))
-        if v2:
-            y = year4(_int(line[1:3], "year", lineno, 2))
-            p = 3
+        m = (_EPOCH_V2 if v2 else _EPOCH_V3).match(line)
+        if m is not None:
+            y, mo, d, h, mi, s = map(int, m.groups())
+            if v2:
+                y = year4(y)
         else:
-            y = _int(line[1:5], "year", lineno, 2)
-            p = 5
-        mo = _int(line[p + 1:p + 3], "month", lineno, p + 2)
-        d = _int(line[p + 4:p + 6], "day", lineno, p + 5)
-        h = _int(line[p + 7:p + 9], "hour", lineno, p + 8)
-        mi = _int(line[p + 10:p + 12], "minute", lineno, p + 11)
-        s = _int(line[p + 13:p + 15], "second", lineno, p + 14)
+            if v2:
+                y = year4(_int(line[1:3], "year", lineno, 2))
+                p = 3
+            else:
+                y = _int(line[1:5], "year", lineno, 2)
+                p = 5
+            mo = _int(line[p + 1:p + 3], "month", lineno, p + 2)
+            d = _int(line[p + 4:p + 6], "day", lineno, p + 5)
+            h = _int(line[p + 7:p + 9], "hour", lineno, p + 8)
+            mi = _int(line[p + 10:p + 12], "minute", lineno, p + 11)
+            s = _int(line[p + 13:p + 15], "second", lineno, p + 14)
         k = min(n, 8)
         vals = _met_values(line, head, k, lineno, lenient, f.notes)
         i += 1
@@ -158,14 +179,16 @@ def read_met(lines, info, eol="lf", lenient=False):
             k = min(10, n - len(vals))
             vals.extend(_met_values(c, 4, k, i + 1, lenient, f.notes))
             i += 1
-        for k, v in enumerate(vals):
+        for v in vals:
+            if v in good:
+                continue
             t = v.strip()
             if t:
                 try:
                     Decimal(t)
                 except InvalidOperation:
                     raise CorruptError(f"bad met value {t!r}", line=lineno, rule="MET.VALUE") from None
-        import datetime
+            good.add(v)
         try:
             datetime.datetime(y, mo, d, h, mi, min(s, 59))
         except ValueError:
@@ -175,14 +198,25 @@ def read_met(lines, info, eol="lf", lenient=False):
     return f
 
 
+class _Field(dict):
+    """The F7.1 column text of a met value (write_met), once per distinct value: they repeat."""
+
+    def __missing__(self, v):
+        txt = v.rjust(7)[-7:] if v.strip() else " " * 7
+        if type(v) is str:
+            self[v] = txt
+        return txt
+
+
 def write_met(f, version):
     out = [r.line() for r in f.header]
     out.append(" " * 60 + END)
     v2 = version < "3.02"
+    field = _Field().__getitem__
     for ep in f.epochs:
         y, mo, d, h, mi, s = ep.time
         stamp = (f" {y % 100:02d}" if v2 else f" {y:4d}") + f" {mo:2d} {d:2d} {h:2d} {mi:2d} {int(s):2d}"
-        vals = [v.rjust(7)[-7:] if v.strip() else " " * 7 for v in ep.vals]
+        vals = list(map(field, ep.vals))
         out.append((stamp + "".join(vals[:8])).rstrip())
         for k in range(8, len(vals), 10):
             out.append(("    " + "".join(vals[k:k + 10])).rstrip())

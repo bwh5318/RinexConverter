@@ -4,6 +4,7 @@ Everything is bytes until split_lines(), which decodes latin-1 (one byte, one
 character, so any byte survives) and records the line-ending style.
 """
 
+import itertools
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -133,12 +134,11 @@ def join_lines(lines, eol="lf"):
     sep = "\r\n" if eol == "crlf" else "\n"
 
     def chunks():
-        buf = []
-        for line in lines:
-            buf.append(line)
-            if len(buf) >= 50000:
-                yield (sep.join(buf) + sep).encode("latin-1")
-                buf = []
-        if buf:
-            yield (sep.join(buf) + sep).encode("latin-1")
+        it = iter(lines)
+        while True:
+            buf = list(itertools.islice(it, 50000))     # (taken in C, not a Python step per line)
+            if not buf:
+                return
+            buf.append("")                              # the last line's terminator
+            yield sep.join(buf).encode("latin-1")
     return spool.join_bytes(chunks())

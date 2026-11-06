@@ -12,11 +12,12 @@ Layout rules (PLAN §3.4):
   RINEX 3/4: one unwrapped line per satellite, 13 obs types per header line.
 """
 
+import datetime
 import re
 from decimal import Decimal, InvalidOperation
 
 from .errors import CorruptError
-from .header import END, HeaderRecord, read_header
+from .header import END, HeaderRecord, fmt_f, read_header
 
 FIELD = 16
 BLANK = " " * FIELD
@@ -24,6 +25,16 @@ _ZERO_CHARS = "0.+- "
 # one or more F14.3+LLI+SSI fields; a short last field (trailing blanks stripped) is fine
 _FIELDS_OK = re.compile(r"(?:[ 0-9.+-]{14}[ 0-9]{2})*(?:[ 0-9.+-]{0,14}|[ 0-9.+-]{14}[ 0-9]{0,2})")
 _VALUE_OK = re.compile(r" *[+-]?(?:\d+\.?\d*|\.\d+) *| *")
+_DEL_VALUE_CHARS = str.maketrans("", "", " 0123456789.+-")
+_FLAG_CHARS = " 0123456789"
+
+
+def _fields_ok(body):
+    """_FIELDS_OK.fullmatch(body), in about half the time: the regex fixes every character's
+    class by its column (16 per field), so it holds exactly when every character is one an
+    F14.3 value may hold and those in the LLI and SSI columns (0-based 14 and 15 of a field)
+    are blanks or digits (tests/unit/test_speed_equivalence.py checks the two agree)."""
+    return not body.translate(_DEL_VALUE_CHARS) and not (body[14::16] + body[15::16]).strip(_FLAG_CHARS)
 
 
 def _bad_field(body, lineno, col0):
@@ -137,7 +148,10 @@ class ObsFile:
         cur = LineCursor(payload, pos, lineno)
         notes = None if self._read_once else self.notes
         gen = _iter_v2 if self.version < "3" else _iter_v3
-        yield from gen(self, cur, lenient, notes)
+        # a re-read parses the same bytes with the same code as a first read that ran to its
+        # end without error (_read_once is set only then), so the observation-field character
+        # check, which only raises, would pass again: it is skipped (check=False)
+        yield from gen(self, cur, lenient, notes, not self._read_once)
         self._read_once = True
 
     @property
@@ -423,13 +437,14 @@ def _skipped(f, notes, lineno):
               "dropped (each such line is counted in loss data-text-dropped)", lineno)
 
 
-def _iter_v2(f, cur, lenient, notes):
+def _iter_v2(f, cur, lenient, notes, check=True):
     types = f.types
     ntypes = len(types.v2)
     nlines = max(1, -(-ntypes // 5))
     width = FIELD * ntypes
     dsys = _default_sys(f)
     blank_at = None
+    satc = {}            # satellite id as written -> norm_sat's id (norm_sat is pure; bad ids raise)
     while True:
         line = cur.next()
         if line is None:
@@ -500,7 +515,11 @@ def _iter_v2(f, cur, lenient, notes):
             for j in range(12):
                 if k >= nsat:
                     break
-                sats.append(norm_sat(satfield[3 * j:3 * j + 3], dsys, lineno))
+                x = satfield[3 * j:3 * j + 3]
+                sat = satc.get(x)
+                if sat is None:
+                    sat = satc[x] = norm_sat(x, dsys, lineno)
+                sats.append(sat)
                 k += 1
             if k >= nsat:
                 break
@@ -525,32 +544,43 @@ def _iter_v2(f, cur, lenient, notes):
             raise CorruptError("file ends inside an epoch", line=cur.lineno, rule="OBS.TRUNCATED")
         data = []
         last_w = width - 80 * (nlines - 1)       # columns of fields on a record's last line
-        for _ in range(nsat):
+        # the epoch's nsat * nlines record lines are in the cursor's buffer (has, above): read
+        # from it directly (faster than cur.next() per line), the line numbers counted as
+        # cur.next() counts them; ln is the record's last line, which errors name
+        buf, k0, l0 = cur.buf, cur.k, cur.lineno
+        cur.k = k0 + nsat * nlines
+        cur.lineno = l0 + nsat * nlines
+        for q in range(nsat):
+            ln = l0 + (q + 1) * nlines
             if nlines == 1:
-                rec = cur.next()
+                rec = buf[k0 + q]
                 if lenient and len(rec) > width and rec[width:].strip():
-                    _skipped(f, notes, cur.lineno)
+                    _skipped(f, notes, ln)
                     rec = rec[:width]
             else:
-                parts = []
-                for j in range(nlines):
-                    x = cur.next()
-                    lim = 80 if j < nlines - 1 else last_w
-                    if len(x) > lim and x[lim:].strip():
-                        if lenient:
-                            # (it was cut at column 80 unreported: round 32)
-                            _skipped(f, notes, cur.lineno)
-                            x = x[:lim]
-                        elif x[80:].strip():
-                            _skipped(f, notes, cur.lineno)   # refused by the validator
-                    parts.append(x[:80].ljust(80))
-                rec = "".join(parts)
-            if not _FIELDS_OK.fullmatch(rec):
-                _bad_field(rec, cur.lineno, 1)
+                xs = buf[k0 + q * nlines:k0 + (q + 1) * nlines]
+                if len(xs[-1]) <= last_w and max(map(len, xs)) <= 80:
+                    # every line within its columns (the usual case): nothing to drop
+                    rec = "".join([x.ljust(80) for x in xs])
+                else:
+                    parts = []
+                    for j, x in enumerate(xs):
+                        lim = 80 if j < nlines - 1 else last_w
+                        if len(x) > lim and x[lim:].strip():
+                            if lenient:
+                                # (it was cut at column 80 unreported: round 32)
+                                _skipped(f, notes, ln - nlines + 1 + j)
+                                x = x[:lim]
+                            elif x[80:].strip():
+                                _skipped(f, notes, ln - nlines + 1 + j)   # refused by the validator
+                        parts.append(x[:80].ljust(80))
+                    rec = "".join(parts)
+            if check and not _fields_ok(rec):
+                _bad_field(rec, ln, 1)
             if len(rec) > width:
                 if rec[width:].strip():
                     raise CorruptError("more observations than # / TYPES OF OBSERV declares",
-                                       line=cur.lineno, rule="OBS.DATA.EXTRA")
+                                       line=ln, rule="OBS.DATA.EXTRA")
                 rec = rec[:width]
             else:
                 rec = rec.ljust(width)
@@ -558,9 +588,11 @@ def _iter_v2(f, cur, lenient, notes):
         yield Epoch(t, flag, clock, sats, data, types=types, lineno=lineno)
 
 
+_SEC_LO, _SEC_HI = Decimal(0), Decimal(61)
+
+
 def _check_time(y, mo, dd, hh, mi, sec, lineno):
-    import datetime
-    ok = 0 <= hh <= 23 and 0 <= mi <= 59 and sec.is_finite() and Decimal(0) <= sec < Decimal(61)
+    ok = 0 <= hh <= 23 and 0 <= mi <= 59 and sec.is_finite() and _SEC_LO <= sec < _SEC_HI
     if ok:
         try:
             datetime.date(year4(y) if y < 100 else y, mo, dd)
@@ -571,11 +603,12 @@ def _check_time(y, mo, dd, hh, mi, sec, lineno):
                            rule="OBS.EPOCH.TIME")
 
 
-def _iter_v3(f, cur, lenient, notes):
+def _iter_v3(f, cur, lenient, notes, check=True):
     types = f.types
     widths = {s: FIELD * len(c) for s, c in types.sys.items()}
     ps_ok = f.version >= "4.02"
     blank_at = None
+    satc = {}            # satellite id as written -> norm_sat's id (norm_sat is pure; bad ids raise)
     while True:
         line = cur.next()
         if line is None:
@@ -656,13 +689,21 @@ def _iter_v3(f, cur, lenient, notes):
             raise CorruptError("file ends inside an epoch", line=cur.lineno, rule="OBS.TRUNCATED")
         sats = []
         data = []
-        for _ in range(nsat):
-            rec = cur.next()
-            i = cur.lineno
+        # the nsat records are in the cursor's buffer (has, above): read from it directly, the
+        # line numbers counted as cur.next() counts them
+        buf, k0, l0 = cur.buf, cur.k, cur.lineno
+        cur.k = k0 + nsat
+        cur.lineno = l0 + nsat
+        for j in range(nsat):
+            rec = buf[k0 + j]
+            i = l0 + j + 1
             if rec[0:1] == ">":
                 raise CorruptError(f"epoch declares {nsat} satellites but has fewer", line=i,
                                    rule="OBS.EPOCH.NSAT")
-            sat = norm_sat(rec[0:3], "G", i)
+            x = rec[0:3]
+            sat = satc.get(x)
+            if sat is None:
+                sat = satc[x] = norm_sat(x, "G", i)
             w = widths.get(sat[0])
             if w is None:
                 raise CorruptError(f"satellite {sat} has no SYS / # / OBS TYPES", line=i,
@@ -671,7 +712,7 @@ def _iter_v3(f, cur, lenient, notes):
             if lenient and len(body) > w and body[w:].strip():
                 _skipped(f, notes, i)
                 body = body[:w]
-            if not _FIELDS_OK.fullmatch(body):
+            if check and not _fields_ok(body):
                 _bad_field(body, i, 4)
             if len(body) > w:
                 if body[w:].strip():
@@ -703,7 +744,6 @@ def fmt_clock(clock, width, decimals, as_written=False):
     RNX2CRX/CRX2RNX write it, so plain and Hatanaka outputs of a conversion are identical.
     as_written (RINEX 2): a value with no Fw.d form is written with its own digits when they
     fit the field (a ' 123.4567890' read from a RINEX 2 file: obsconv._clock_v2)."""
-    from .header import fmt_f
     try:
         s = fmt_f(clock, width, decimals).strip()
     except OverflowError:
@@ -784,8 +824,8 @@ def iter_obs_lines(f, version):
                 continue
             yield from epoch_line_v2(ep, ep.sats)
             for rec in ep.data:
-                if not rec:
-                    yield ""
+                if len(rec) <= 80:
+                    yield rec.rstrip()               # one line (an empty record: "")
                     continue
                 for k in range(0, len(rec), 80):
                     yield rec[k:k + 80].rstrip()
@@ -796,5 +836,5 @@ def iter_obs_lines(f, version):
                 for r in ep.records:
                     yield r.line()
                 continue
-            for sat, rec in zip(ep.sats, ep.data):
-                yield (sat + rec).rstrip()
+            # (sat + rec).rstrip() for each satellite, the loop in C
+            yield from map(str.rstrip, map(str.__add__, ep.sats, ep.data))

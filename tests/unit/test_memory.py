@@ -65,8 +65,42 @@ class MemoryScaling(unittest.TestCase):
                 # fixed costs shrinking in proportion)
                 self.assertLess(p4 / p1, 4.6, (p1, p4))
                 # a bounded multiple of what has to be held anyway: source + output
-                # (measured 2026-10-31: 2.2x to 2.11, 1.9x to 4.02)
-                self.assertLess(p4, 4 * (len(large) + o4), (p4, len(large), o4))
+                # (measured 2026-10-31: 2.2x to 2.11, 1.9x to 4.02; after the speed work of
+                # 2026-11-03, 2.31x and 2.06x, a fixed ~0.2-0.7 MB more that does not grow with
+                # the file. The bound was 4x until Sol's xhigh review of that work found it too
+                # loose to catch a regression.)
+                self.assertLess(p4, 2.6 * (len(large) + o4), (p4, len(large), o4))
+
+
+class SurveyMemory(unittest.TestCase):
+    """Pass 1 summarises records by field mask; a file whose records hold almost all distinct
+    masks held one entry per record, 2.72 times the file on Sol's case (xhigh review of the
+    speed work). Past obsconv._SURVEY_MASKS masks a satellite's are folded into its counts."""
+
+    def survey_peak(self, data, limit):
+        from unittest import mock
+
+        from rinexconv import obsconv
+        from rinexconv.engine import load_bytes
+        src = load_bytes(data).model
+        src._survey = None                 # load_bytes ran pass 1: run it again, measured
+        with mock.patch.object(obsconv, "_SURVEY_MASKS", limit):
+            tracemalloc.start()
+            try:
+                obsconv.presurvey(src)
+                _, top = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        return top
+
+    def test_distinct_masks_are_bounded(self):
+        from rinexconv import obsconv
+
+        from .test_speed_equivalence import distinct_masks
+        data = distinct_masks(2000, 12)
+        least = self.survey_peak(data, 1)            # folds at every new mask: the least it holds
+        top = self.survey_peak(data, obsconv._SURVEY_MASKS)
+        self.assertLess(top - least, 0.15 * len(data), (top, least, len(data)))
 
 
 class NoWholeFileCopies(unittest.TestCase):

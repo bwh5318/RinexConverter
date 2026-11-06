@@ -44,6 +44,9 @@ from tests.independent.allowed import check as allowed_check  # noqa: E402
 
 CORPUS = ROOT / "data" / "corpus"
 MANIFEST = ROOT / "tests" / "corpus" / "manifest.json"
+# half the medians measured on the desktop (i7-13700F, 12 jobs) on 2026-11-03: obs 5.2, nav 2.5,
+# met 3.1 decoded MB/s per process (docs/ENVIRONMENT.md "Performance budgets")
+BUDGET_MBPS = {"obs": 2.6, "nav": 1.2, "met": 1.5}
 
 
 def file_date(name):
@@ -295,6 +298,7 @@ def run(task):
             rec["repairs"] = len(rep["repairs"])
             rec["assumptions"] = len(rep["assumptions"])
             rec["seconds"] = round(time.time() - t0, 2)
+            rec["payload_bytes"] = len(inp)
             if kind == "obs":
                 probs = compare_obs(inp, outs[0].data, rep, tin=tin)
             elif kind == "nav":
@@ -427,6 +431,20 @@ def summarise(results, elapsed, out):
         print("   LOSS", r["path"], r.get("source_version"), "->", r["target"], r["loss_violations"][:3])
     print(f"{len(results)} conversions in {elapsed:.0f} s: {dict(outc)}")
     print(f"token problems: {len(tok)}; idempotence failures: {len(idem)}")
+    # performance budgets (PLAN §4 "Performance"; docs/ENVIRONMENT.md): the median conversion
+    # throughput per kind, decoded RINEX MB per second of the conversion itself (no load, no
+    # checks), must stay above half of what the desktop measured on 2026-11-03 under a 12-job run
+    tp = defaultdict(list)
+    for r in results:
+        if r["outcome"] == "converted" and r.get("seconds") and r.get("payload_bytes"):
+            tp[r["kind"]].append(r["payload_bytes"] / 1e6 / r["seconds"])
+    line = []
+    for k in sorted(tp):
+        med = sorted(tp[k])[len(tp[k]) // 2]
+        flag = "" if med >= BUDGET_MBPS.get(k, 0) else " BELOW BUDGET"
+        line.append(f"{k} {med:.1f} (budget {BUDGET_MBPS.get(k, 0):.1f}){flag}")
+    if line:
+        print("throughput, median MB/s: " + "; ".join(line))
     by = defaultdict(Counter)
     for r in results:
         key = (r["kind"], r.get("source_version", "?"))

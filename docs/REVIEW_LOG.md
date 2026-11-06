@@ -208,3 +208,19 @@ Evidence at the end: unit suite 1,060 passed, 27 skipped, 13 xfailed; full corpu
 5,208 converted, 72 by-design refusals (the same files as every run), 0 crashes, 0 token problems (both
 nav checkers), 0 idempotence failures, 0 loss-table violations, 454 wrapper legs clean, no round trip
 with different data.
+
+## rinexconv speed work — Codex Sol 6.1 (xhigh), 2026-11-05/06
+
+The user: "first i want you to try to optimize the speed of the conversions as much as you can. review with
+sol on xhigh". Sol (high) wrote a plan first; four Claude agents optimised four areas; Sol (xhigh) reviewed
+the result for any input where the optimised code differs from the original (docs/DECISIONS.md, "speed work").
+
+| Pass | Reviewer | Score | What it found (all fixed) |
+|---|---|---|---|
+| 44 | Sol review | 7 | The batch companion listing was kept while the folder's modification time was unchanged (a nav file added within its resolution was missed: a refusal where the original converted); the survey's distinct-mask table had no bound (pass-1 peak 2.38x -> 3.67x the file on a synthetic all-distinct file); test_memory's bound too loose; the --jobs memory scheduling described too strongly |
+| **45** | **Sol verify** | **9, confident** | none blocking: "both blockers are resolved; independent verification found no new output, report, refusal, warning, or ordering difference" |
+
+Evidence at the end: unit suite 1,108 passed, 27 skipped, 13 xfailed; whole-corpus digests (13,915
+conversions x outputs, reports, refusals) identical between the original code and the final code; the corpus
+run on the final code (corpus_opt) identical to corpus_r41 in every field of all 5,280 rows; whole
+conversions 1.7-1.9x faster (obs and large nav files), 1.25-1.3x on small files.

@@ -26,6 +26,12 @@ The grammar, with line references into the C sources, is in
   but refuses (``CorruptError``) any input it cannot represent so that
   CRX2RNX gives the same values back, instead of silently altering it.
 
+Both directions have a fast path for the common lines (every field steady or blank as in
+the previous epoch: the satellite's state in columns, the line summed or differenced with
+map() and printed with one %-format), which falls back to the general code on anything
+else; ``_FAST = False`` turns it off, and tests/unit/test_hatanaka_speed_equivalence.py
+checks the two give the same bytes and errors.
+
 Standard library only; bytes in, bytes out (RINEX is never handled as text).
 Every malformed input raises ``rinexcore.errors.CorruptError`` with a line
 number and a rule id ``CRX.*`` (decoder) or ``CRX.ENC.*`` (encoder).
@@ -34,6 +40,8 @@ number and a rule id ``CRX.*`` (decoder) or ``CRX.ENC.*`` (encoder).
 import datetime
 import re
 from array import array
+from itertools import accumulate, compress, islice, repeat
+from operator import add, sub, truediv
 
 from .. import __version__ as _PKG_VERSION
 from ..errors import CorruptError
@@ -75,6 +83,17 @@ _SMALL = [(b"         -.%03d" % -v) if v < 0 else (b"          .%03d" % v)
 _BLANK14 = b" " * 14
 _BLANK16 = b" " * 16
 _NONES = (None,) * MAXTYPE
+_K1000 = (1000,) * MAXTYPE   # map(truediv, values, _K1000): the fast paths' value / 1000
+_SPLIT_CHUNK = 1 << 22    # bytes a chunk of _split_lines
+_ONES = b"\x01" * MAXTYPE     # blank-field masks (decoder fast path)
+_ZEROS = b"\x00" * MAXTYPE
+_DOT_SEL = bytes(1 if i == 46 else 0 for i in range(256))   # '.' -> 1 (encoder fast path)
+_DIG_DOT = bytes(46 if 48 <= i <= 57 else 32 if i == 32 else 120 for i in range(256))
+# The decoder's fast path (lines whose fields are all steady order-3 arcs or blank, as in the
+# previous epoch) and the encoder's (fields all steady or blank) give the same bytes, errors
+# and states as the general code; tests/unit/test_hatanaka_speed_equivalence.py sets this
+# False to compare the two.
+_FAST = True
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -276,7 +295,20 @@ def _split_lines(data, rule_prefix):
         raise _corrupt("NUL byte in the data", data.count(b"\n", 0, nul) + 1,
                        rule_prefix + "NUL")
     starts = array("q", [0])
-    pos = data.find(b"\n")
+    # The line starts by split() and accumulate() over chunks that end with an LF (C speed;
+    # one chunk's lines held at a time). A chunk with a line longer than MAX_LINE, or a
+    # window without LF, is left to the loop below, which goes on from the chunk's start.
+    a = 0
+    while True:
+        q = data.rfind(b"\n", a, a + _SPLIT_CHUNK)
+        if q < 0:
+            break
+        lens = list(map(len, data[a:q].split(b"\n")))
+        if max(lens) > MAX_LINE:
+            break
+        starts.extend(islice(accumulate(map(add, lens, repeat(1)), initial=a), 1, None))
+        a = q + 1
+    pos = data.find(b"\n", a)
     while pos >= 0:
         if pos - starts[-1] > MAX_LINE:
             raise _corrupt(f"line longer than {MAX_LINE} characters", len(starts),
@@ -364,6 +396,56 @@ def _fmt_value(v, line_no):
     if v <= -1000000000000:
         _bad_value(v, line_no)
     return b"%10d.%03d" % (-(-v // 1000), -v % 1000)
+
+
+def _out_template(pairs, mask, sid, rv2):
+    """The decoder fast path's printed lines of one satellite: (mask, fmt, n, exact).
+
+    fmt is a %-format with one %14.3f per non-blank field (mask: None when no field is
+    blank, else bytes with 0 at the blank fields) and the flag pairs, blank fields, line
+    breaks and trailing-blank trims of the general code (C:633-682) as literal text; n is
+    the length of fmt % values when every value fits F14.3 (|v| < 10**13 / 10**12 for a
+    negative, putfield's range: a longer output means one does not). %14.3f of v / 1000
+    prints the digits of _fmt_value (v < 2**53, and division and printing are correctly
+    rounded) except for |v| < 1000, where it prints `0.ddd` / `-0.ddd` for _SMALL's
+    `.ddd` / `-.ddd`: the caller replaces b" 0." and b"-0.", which a printed value holds
+    only there (its one point has 10 columns of integer part, a digit before and after
+    it), and which cannot span a value and the text beside it (a value starts with a
+    blank, '-' or a digit, never '.', and ends with two digits). exact is False when the
+    literal text holds either pattern itself (blank field + flags `0.`): no fast path."""
+    if mask is None:
+        # no blank field (the common case): the literal text between two values is one
+        # flag pair, or a trimmed pair + LF, too short to hold a pattern; only the id can
+        nt = len(pairs)
+        lit = sid + b"".join(pairs)
+        if 37 in lit:                                    # '%'
+            sid = sid.replace(b"%", b"%%")
+            pairs = [p.replace(b"%", b"%%") for p in pairs]
+        if rv2:
+            fmt = b"".join([(b"%14.3f" + b"%14.3f".join(pairs[k:k + 5])).rstrip(b" ") + b"\n"
+                            for k in range(0, nt, 5)])
+        else:
+            fmt = (sid + b"%14.3f" + b"%14.3f".join(pairs)).rstrip(b" ") + b"\n"
+        return (None, fmt, len(fmt) + 8 * nt - lit.count(b"%"),
+                sid != b" 0." and sid != b"-0.")
+    segs = []
+    run = sid
+    last = len(pairs) - 1
+    for j, p in enumerate(pairs):
+        if mask[j]:
+            segs.append(run)
+            run = p
+        else:
+            run += _BLANK14 + p
+        if rv2 and (j % 5 == 4 or j == last):      # RINEX 2: 5 fields a line
+            run = run.rstrip(b" ") + b"\n"           # (values end in a digit: the trim
+    if not rv2:                                      #  stops at the last value)
+        run = run.rstrip(b" ") + b"\n"
+    segs.append(run)
+    lit = b"\x00".join(segs)                         # (no NUL in the data: _split_lines)
+    return (mask, b"%14.3f".join([s.replace(b"%", b"%%") for s in segs]),
+            len(lit) - (len(segs) - 1) + 14 * (len(segs) - 1),
+            b" 0." not in lit and b"-0." not in lit)
 
 
 def iter_crx_to_rnx(data, *, chunk_size=1 << 20, fix_clock_bug=False):
@@ -469,6 +551,19 @@ def _decode(data, fix_clock_bug):
     blank14 = _BLANK14
     blank16 = _BLANK16
     field_chars = _FIELD_CHARS
+    data, starts = lines.data, lines.starts
+    strip_cr = cont is not lines
+    # Fast path (see _out_template): RINEX 2 and 3/4 layouts with at least one type. A
+    # satellite whose fields are all steady order-3 arcs or blank is kept in column form,
+    # the tuple (mask, values, d1s, d2s, ntype) (mask None: no blank field; else 0 at the
+    # blanks, the lists holding the non-blank fields only), instead of the list of field
+    # states; a line with the same blanks and a plain difference in every other field is
+    # then summed with map() and printed with one %-format.
+    fast = _FAST and (rv2 or rv3)
+    tmpl_of = _out_template
+    tcache = {}                # (id, mask, fl) -> _out_template(...)
+    rcache = {}                # (fl, flag diff) -> fl repaired
+    pmasks = {}                # nt * 256 + n -> mask of n fields then nt - n blank ones
 
     while pos < nlines:
         c = cont[pos]
@@ -582,10 +677,10 @@ def _decode(data, fix_clock_bug):
         else:
             tg = types[1]
             nts = [tg[s[0]] for s in ids]
-            for k in range(nsat):
-                if nts[k] < 0:
-                    raise _corrupt(f"satellite {ids[k]!r}: GNSS type not defined in the "
-                                   "header", ep_line_no, "CRX.SYS")
+            if nsat and min(nts) < 0:                 # (the first such satellite)
+                k = next(k for k in range(nsat) if nts[k] < 0)
+                raise _corrupt(f"satellite {ids[k]!r}: GNSS type not defined in the "
+                               "header", ep_line_no, "CRX.SYS")
         if old_ids:
             sattbl = [old_ids.get(s, -1) for s in ids]
         else:
@@ -630,17 +725,28 @@ def _decode(data, fix_clock_bug):
         # ---- observation lines (getdiff C:707-770, data C:617-683)
         # Field states: a steady arc of order 3 is the 3-tuple (v, d1, d2) (d3 is
         # not needed for the next epoch); anything else is the 1-tuple
-        # ((arc, v, d1, ..., d_order),).
+        # ((arc, v, d1, ..., d_order),); a blank field None. The state of a satellite is
+        # the list of its field states, or the column form of the fast path:
+        # (mask, values, d1s, d2s, ntype) when every field is steady or blank.
         new_dy = [None] * nsat
         new_fl = [None] * nsat
         sat_out = []
+        # the nsat observation lines, cut in one split (cont[k] of each: one CR before
+        # the LF dropped) unless the file ends first (then line by line, as C reads)
+        end = pos + nsat
+        if end <= n_full:
+            obs = data[starts[pos]:starts[end]]
+            if strip_cr:
+                obs = obs.replace(b"\r\n", b"\n")
+            obs = obs.split(b"\n")
+        else:
+            obs = [cont[k] for k in range(pos, n_full)]
         for i in range(nsat):
             if pos >= n_full:
                 raise _corrupt("the file ends inside an epoch", pos + 1, "CRX.TRUNCATED")
-            dl = cont[pos]
+            dl = obs[i]
             pos += 1
             nt = nts[i]
-            n2 = nt + nt
             parts = dl.split(b" ", nt)
             if len(parts) > nt:
                 dflag = parts.pop()
@@ -653,9 +759,12 @@ def _decode(data, fix_clock_bug):
                 raise _corrupt("observation fields contain characters other than digits, "
                                "'-' and '&'", pos, "CRX.FIELD")
             i0 = sattbl[i]
-            # flags (C:642-653)
+            # flags (C:642-653). The flag state of a satellite is (fl, its 2-byte pairs or
+            # None until they are needed, the fast path's template for fl or None).
             if i0 < 0:
+                n2 = nt + nt
                 prev = None
+                tmpl = None
                 fl = dflag.translate(_AMP_TO_SP)
                 if rv3:
                     if len(fl) < n2:
@@ -664,27 +773,105 @@ def _decode(data, fix_clock_bug):
                     fl = fl[:n2]
                 else:
                     fl = fl.ljust(n2)[:n2]
-                pairs = [fl[k:k + 2] for k in range(0, n2, 2)]
+                pairs = None
             else:
                 prev = dy0[i0]
-                if len(prev) != nt:
+                if (prev[4] if prev.__class__ is tuple else len(prev)) != nt:
                     raise _corrupt("number of observation types changed without an "
                                    "initialised epoch", pos, "CRX.NTYPE")
-                fl, pairs = flag1[i0]
+                fl, pairs, tmpl = flag1[i0]
                 if dflag:
-                    fn = _repair(fl, dflag)
-                    if len(fn) != n2:
-                        fn = fn[:n2]
+                    # (fl, dflag) -> repaired flags: the same changes recur (SSI 7 -> 8 -> 7)
+                    key = (fl, dflag)
+                    fn = rcache.get(key)
+                    if fn is None:
+                        n2 = nt + nt                # == len(fl)
+                        fn = _repair(fl, dflag)
+                        if len(fn) != n2:
+                            fn = fn[:n2]
+                        if len(rcache) >= 1 << 14:
+                            rcache.clear()
+                        rcache[key] = fn
                     if fn != fl:
                         fl = fn
-                        pairs = [fl[k:k + 2] for k in range(0, n2, 2)]
+                        pairs = tmpl = None
             # values (getdiff C:729-768 and the sums of data C:657-665)
+            quirk = b"-0" in region          # "-0ddddd" needs C's split (_num_field)
+            if prev.__class__ is tuple:
+                mask, pv, p1, p2, _ = prev
+                if not quirk:
+                    # ---- fast path: the same blank fields as in the previous epoch and a
+                    # plain difference (no "N&", which int() refuses) in each other one.
+                    # It changes no state until it has the whole line; on anything else
+                    # the general code below does the line from the start (and raises
+                    # its errors).
+                    if b"" in parts:
+                        m = bytes(map(bool, parts))
+                        if np_ < nt:
+                            m += _ZEROS[:nt - np_]
+                        vp = list(filter(None, parts))
+                    else:                            # blank fields only after the last
+                        vp = parts
+                        if np_ == nt:
+                            m = None
+                        else:
+                            m = pmasks.get(nt * 256 + np_)
+                            if m is None:
+                                m = pmasks[nt * 256 + np_] = _ONES[:np_] + _ZEROS[:nt - np_]
+                    if m == mask:
+                        try:
+                            h2 = list(map(add, map(int, vp), p2))
+                        except ValueError:
+                            h2 = None
+                        if h2 is not None:
+                            h1 = list(map(add, h2, p1))
+                            vv = list(map(add, h1, pv))
+                            fl_f = fl
+                            tmpl_f = tmpl
+                            if tmpl_f is None or tmpl_f[0] != m:
+                                if crx1 and m is not None:
+                                    # CRINEX 1: a blank field prints and keeps blank flags
+                                    # (the general code's `blanks`)
+                                    fr = bytearray(fl)
+                                    for j in range(nt):
+                                        if not m[j]:
+                                            fr[j + j] = fr[j + j + 1] = 32
+                                    if fr != fl:
+                                        fl_f = bytes(fr)
+                                sid = ids[i] if rv3 else b""
+                                key = (sid, m, fl_f)
+                                tmpl_f = tcache.get(key)
+                                if tmpl_f is None:
+                                    if len(tcache) >= 1 << 14:      # (a few MB)
+                                        tcache.clear()
+                                    tmpl_f = tcache[key] = tmpl_of(
+                                        [fl_f[k:k + 2] for k in range(0, nt + nt, 2)], m, sid, rv2)
+                            if tmpl_f[3]:
+                                try:
+                                    s = tmpl_f[1] % tuple(map(truediv, vv, _K1000))
+                                except OverflowError:            # far out of range
+                                    s = b""
+                                if len(s) == tmpl_f[2]:          # every value in range
+                                    sat_out.append(s.replace(b" 0.", b"  .")
+                                                   .replace(b"-0.", b" -."))
+                                    new_dy[i] = (m, vv, h1, h2, nt)
+                                    new_fl[i] = (fl_f, pairs if fl_f is fl else None, tmpl_f)
+                                    continue
+                # general code: the field states as a list
+                if mask is None:
+                    prev = list(zip(pv, p1, p2))
+                else:
+                    it = zip(pv, p1, p2)
+                    prev = [next(it) if b else None for b in mask]
             if np_ < nt:
                 parts.extend([b""] * (nt - np_))
-            quirk = b"-0" in region          # "-0ddddd" needs C's split (_num_field)
+            if pairs is None:
+                pairs = [fl[k:k + 2] for k in range(0, nt + nt, 2)]
+            fl_in = fl
             st = []
             vs = []
             nblank = 0
+            n3 = 0
             for f, p in zip(parts, prev if prev is not None else _NONES):
                 if not f:                      # empty field = missing observation
                     st.append(None)
@@ -719,6 +906,7 @@ def _decode(data, fix_clock_bug):
                     h1 = h2 + q1
                     v = h1 + q0
                     st.append((v, h1, h2))
+                    n3 += 1
                 else:
                     a = p[0][0]
                     hist = p[0][1:]
@@ -732,8 +920,11 @@ def _decode(data, fix_clock_bug):
                     v = h[0]
                     if a == 3 and o == 3:
                         st.append((h[0], h[1], h[2]))
+                        n3 += 1
                     else:
                         st.append(((a, *h),))
+                        if a == 3:          # order 1 or 2 of an order-3 arc (see below)
+                            n3 += 1
                 if -1000 < v < 1000:
                     vs.append(small[v + 999])
                 elif v > 0:
@@ -778,8 +969,17 @@ def _decode(data, fix_clock_bug):
                     sat_out.append(body.rstrip(b" ") + b"\n")
             elif rv3:
                 sat_out.append(ids[i])        # C prints the id and no LF (C:637-681)
+            if fast and nt and n3 + nblank == nt:
+                # every field blank or in an order-3 arc past its first value: column form
+                # (fast path next). An arc of order 3 now at order 1, ((3, v, d1),), or 2,
+                # ((3, v, d1, d2),), takes its next step (o + 1 above) exactly as the steady
+                # (v, d1, 0) or (v, d1, d2) would, and gives the same state after it.
+                nb = [(e if len(e) == 3 else (e[0][1], e[0][2], e[0][3] if len(e[0]) > 3 else 0))
+                      for e in st if e is not None]
+                st = (bytes(map(bool, parts)) if nblank else None,
+                      *(zip(*nb) if nb else ((), (), ())), nt)
             new_dy[i] = st
-            new_fl[i] = (fl, pairs)
+            new_fl[i] = (fl, pairs, tmpl if fl is fl_in else None)
 
         # ---- clock and picosecond (C:276-277, C:469-492)
         if have_clock:
@@ -825,11 +1025,9 @@ def _decode(data, fix_clock_bug):
         out.extend(sat_out)
         yield b"".join(out)
 
-        # ---- save the epoch (C:329-335)
-        d = {}
-        for k in range(nsat - 1, -1, -1):
-            d[ids[k]] = k
-        old_ids = d
+        # ---- save the epoch (C:329-335); a repeated id maps to its first index, as
+        # when they are assigned from the last to the first
+        old_ids = dict(zip(reversed(ids), range(nsat - 1, -1, -1)))
         dy0 = new_dy
         flag1 = new_fl
 
@@ -1012,6 +1210,13 @@ def _encode(data, program, date, out):
     oldpsec = b""
     sp2amp = _SP_TO_AMP
     blank14 = _BLANK14
+    # Fast path: a satellite whose fields are all steady (order 2 or 3) or blank is kept in
+    # column form, (dots, values, d1s, d2s, ntype) (dots: column 11 of each field, '.' or
+    # blank; the lists hold the non-blank fields), instead of the list of field states.
+    fast = _FAST
+    ffmts = {}                 # dots -> %-format of the difference fields
+    data, starts = lines.data, lines.starts
+    has_cr = b"\r" in data
 
     def check_types():
         if types[0] > MAXTYPE or max(types[1]) > MAXTYPE:
@@ -1178,6 +1383,14 @@ def _encode(data, program, date, out):
         # ---- observation lines (ggetline, E:696-759)
         bodies = []
         nts = []
+        # the epoch's observation lines (lines[k] of each) cut in one split when they all
+        # end with LF, else read one by one; _enc_chop inline
+        nobs = nsat * ((types[0] + 4) // 5 if rv2 else 1)
+        if pos + nobs <= n_full:
+            blk = data[starts[pos]:starts[pos + nobs] - 1].split(b"\n") if nobs else []
+            pos0 = pos
+        else:
+            blk = None
         for i in range(nsat):
             if rv2:
                 nt = types[0]
@@ -1186,7 +1399,12 @@ def _encode(data, program, date, out):
                     nf = nt - k if nt - k < 5 else 5
                     if pos >= nlines:
                         fail("the file ends inside an epoch", pos + 1, "EOF")
-                    dl = _enc_chop(lines[pos])
+                    raw = lines[pos] if blk is None else blk[pos - pos0]
+                    if has_cr and raw[-1:] == b"\r":
+                        raw = raw[:-1]
+                    dl = raw.rstrip(b" ")
+                    if not dl and raw:
+                        dl = b" "
                     pos += 1
                     if len(dl) > 16 * nf:
                         fail("more data fields than observation types", pos, "NFIELD")
@@ -1195,7 +1413,12 @@ def _encode(data, program, date, out):
             else:
                 if pos >= nlines:
                     fail("the file ends inside an epoch", pos + 1, "EOF")
-                dl = _enc_chop(lines[pos])
+                raw = lines[pos] if blk is None else blk[pos - pos0]
+                if has_cr and raw[-1:] == b"\r":
+                    raw = raw[:-1]
+                dl = raw.rstrip(b" ")
+                if not dl and raw:
+                    dl = b" "
                 pos += 1
                 if len(dl) < 3:
                     fail("observation line too short for a satellite id", pos, "SATLIST")
@@ -1281,70 +1504,140 @@ def _encode(data, program, date, out):
             fb[1::2] = body[15::16]
             flags = bytes(fb)
             # Validate with C-level slicing; on failure _field_error names the field.
-            # Value of a field = int(integer part + 3 decimals); blank fields get a
-            # "0" placeholder so that split() keeps one token per field.
             dots = body[10::16]
             nblank = dots.count(32)
             blanks = None
             if nblank + dots.count(46) != nt or flags.translate(None, _FLAG_OK):
                 _field_error(body, bline)
-            b2 = bytearray(b" " * (14 * nt))
-            for col in range(10):
-                b2[col::14] = body[col::16]
-            b2[10::14] = body[11::16]
-            b2[11::14] = body[12::16]
-            b2[12::14] = body[13::16]
-            if nblank:
-                blanks = []
-                j = dots.find(b" ")
-                while j >= 0:
-                    if body[16 * j:16 * j + 14] != blank14:
-                        _field_error(body, bline)
-                    b2[14 * j:14 * j + 13] = b"0000000000000"
-                    blanks.append(j)
-                    j = dots.find(b" ", j + 1)
-            toks = b2.split()
-            if (len(toks) != nt or b2.translate(None, b" 0123456789-")
-                    or (nt and not (b2[10::14] + b2[11::14] + b2[12::14]).isdigit())):
-                _field_error(body, bline)
-            try:
-                vals = list(map(int, toks))
-            except ValueError:
-                _field_error(body, bline)
-            st = []
-            fs = []
-            for v, p, dch in zip(vals, prev if prev is not None else _NONES, dots):
-                if dch == _SP:                          # blank field
-                    st.append(None)
-                    fs.append(b"")
-                    continue
-                if p is None:                           # new satellite / after a blank
-                    st.append((v,))
-                    fs.append(b"3&%d" % v)
-                    continue
-                if len(p) == 3:                         # order 2 or 3 -> order 3
-                    q0, q1, q2 = p
-                    d1 = v - q0
-                    d2 = d1 - q1
-                    d = d2 - q2
-                    # |d| below this bound cannot have an upper part above 100000
-                    # (the truncations move it by less than 8); see _slip
-                    if -9999200000 < d < 9999200000:
-                        st.append((v, d1, d2))
-                        fs.append(b"%d" % d)
+            # Quick form of the general checks below, giving the values of the non-blank
+            # fields (vp). With the flags blanked: no '.' but the nt - nblank of column 11;
+            # every other value column blank, a digit or '-'; columns 12-14 digits where
+            # column 11 is '.' and blanks where it is blank; then one token per non-blank
+            # field and none in a blank one (which therefore holds 14 blanks) is the
+            # general code's one token per field, each the same bytes (columns 1-10 and
+            # 12-14). Anything else goes to the general checks, which raise or agree.
+            vp = vals = None
+            if fast:
+                ba = bytearray(body)
+                ba[14::16] = ba[15::16] = b" " * nt
+            if fast and ba.count(46) == nt - nblank:
+                ba = ba.translate(None, b".")
+                if (not ba.translate(None, b" 0123456789-")
+                        and (body[11::16] + body[12::16] + body[13::16]).translate(_DIG_DOT)
+                        == dots * 3):
+                    toks = ba.split()
+                    if len(toks) == nt - nblank:
+                        try:
+                            vp = list(map(int, toks))
+                        except ValueError:
+                            vp = None
+            if vp is None:
+                # General checks. Value of a field = int(integer part + 3 decimals); blank
+                # fields get a "0" placeholder so that split() keeps one token per field.
+                b2 = bytearray(b" " * (14 * nt))
+                for col in range(10):
+                    b2[col::14] = body[col::16]
+                b2[10::14] = body[11::16]
+                b2[11::14] = body[12::16]
+                b2[12::14] = body[13::16]
+                if nblank:
+                    blanks = []
+                    j = dots.find(b" ")
+                    while j >= 0:
+                        if body[16 * j:16 * j + 14] != blank14:
+                            _field_error(body, bline)
+                        b2[14 * j:14 * j + 13] = b"0000000000000"
+                        blanks.append(j)
+                        j = dots.find(b" ", j + 1)
+                toks = b2.split()
+                if (len(toks) != nt or b2.translate(None, b" 0123456789-")
+                        or (nt and not (b2[10::14] + b2[11::14] + b2[12::14]).isdigit())):
+                    _field_error(body, bline)
+                try:
+                    vals = list(map(int, toks))
+                except ValueError:
+                    _field_error(body, bline)
+                vp = vals if not nblank else list(compress(vals, dots.translate(_DOT_SEL)))
+            elif nblank and rv2:
+                blanks = [j for j in range(nt) if dots[j] == 32]
+            fields = None
+            if prev.__class__ is tuple:
+                mask, pv, p1, p2, _ = prev
+                if dots == mask:
+                    # ---- fast path: the same blank fields as in the previous epoch and
+                    # every other one steady (order 2 or 3): the differences by map(), and
+                    # when none reaches the slip bound below, the general code's states and
+                    # text (b" ".join(fs) + b" ": "%d " a value, " " a blank field)
+                    d1 = list(map(sub, vp, pv))
+                    d2 = list(map(sub, d1, p1))
+                    dd = list(map(sub, d2, p2))
+                    if not dd or (min(dd) > -9999200000 and max(dd) < 9999200000):
+                        fmt = ffmts.get(dots)
+                        if fmt is None:
+                            fmt = ffmts[dots] = b"".join([b"%d " if c == _DOT else b" "
+                                                          for c in dots])
+                        fields = fmt % tuple(dd)
+                        st = (dots, vp, d1, d2, nt)
+                if fields is None:                      # general code: a list of states
+                    if mask.count(32):
+                        it = zip(pv, p1, p2)
+                        prev = [next(it) if c == _DOT else None for c in mask]
+                    else:
+                        prev = list(zip(pv, p1, p2))
+            if fields is None:
+                if vals is None:                        # (0: placeholder of a blank field)
+                    if nblank:
+                        it = iter(vp)
+                        vals = [next(it) if c == _DOT else 0 for c in dots]
+                    else:
+                        vals = vp
+                st = []
+                fs = []
+                n3 = 0
+                for v, p, dch in zip(vals, prev if prev is not None else _NONES, dots):
+                    if dch == _SP:                          # blank field
+                        st.append(None)
+                        fs.append(b"")
                         continue
-                    hv = (v, d1, d2, d)
+                    if p is None:                           # new satellite / after a blank
+                        st.append((v,))
+                        fs.append(b"3&%d" % v)
+                        continue
+                    if len(p) == 3:                         # order 2 or 3 -> order 3
+                        q0, q1, q2 = p
+                        d1 = v - q0
+                        d2 = d1 - q1
+                        d = d2 - q2
+                        # |d| below this bound cannot have an upper part above 100000
+                        # (the truncations move it by less than 8); see _slip
+                        if -9999200000 < d < 9999200000:
+                            st.append((v, d1, d2))
+                            fs.append(b"%d" % d)
+                            n3 += 1
+                            continue
+                        hv = (v, d1, d2, d)
+                    else:
+                        hv = [v]
+                        for q in range(len(p)):
+                            hv.append(hv[q] - p[q])
+                        d = hv[-1]
+                    if -9999200000 < d < 9999200000 or not _slip(hv, p):
+                        t = tuple(hv[:3])
+                        st.append(t)
+                        fs.append(b"%d" % d)
+                        if len(t) == 3:
+                            n3 += 1
+                    else:                                   # large cycle slip (E:648-651)
+                        st.append((v,))
+                        fs.append(b"3&%d" % v)
+                if nt:
+                    fields = b" ".join(fs) + b" "
+                    if fast and n3 + nblank == nt:
+                        # every field steady or blank: column form (fast path next)
+                        nb = [e for e in st if e is not None]
+                        st = (dots, *(zip(*nb) if nb else ((), (), ())), nt)
                 else:
-                    hv = [v]
-                    for q in range(len(p)):
-                        hv.append(hv[q] - p[q])
-                    d = hv[-1]
-                if -9999200000 < d < 9999200000 or not _slip(hv, p):
-                    st.append(tuple(hv[:3]))
-                    fs.append(b"%d" % d)
-                else:                                   # large cycle slip (E:648-651)
-                    st.append((v,))
-                    fs.append(b"3&%d" % v)
+                    fields = b""
             if blanks is not None and rv2:
                 for j in blanks:
                     if flags[2 * j] != _SP or flags[2 * j + 1] != _SP:
@@ -1352,10 +1645,6 @@ def _encode(data, program, date, out):
                              "Compact RINEX 1.0 cannot hold", bline, "FLAG2")
             else:
                 blanks = None
-            if nt:
-                fields = b" ".join(fs) + b" "
-            else:
-                fields = b""
             if i0 < 0:
                 if rv2:
                     piece.append((fields + flags).rstrip(b" "))
@@ -1368,17 +1657,17 @@ def _encode(data, program, date, out):
                     for j in blanks:
                         fo2[2 * j] = fo2[2 * j + 1] = _SP
                     fo = bytes(fo2)
-                piece.append((fields + _strdiff(fo, flags)).rstrip(b" "))
+                # (_strdiff of equal flags is b"")
+                piece.append((fields if fo == flags else fields + _strdiff(fo, flags))
+                             .rstrip(b" "))
             piece.append(b"\n")
             new_dy[i] = st
             new_fl[i] = flags
         out.append(b"".join(piece))
 
-        # ---- save (E:293-300)
-        d = {}
-        for k in range(nsat - 1, -1, -1):
-            d[ids[k]] = k
-        old_ids = d
+        # ---- save (E:293-300); a repeated id cannot occur (DUPSAT), but it would map to
+        # its first index, as when assigned from the last to the first
+        old_ids = dict(zip(reversed(ids), range(nsat - 1, -1, -1)))
         oldline = etext
         oldpsec = newpsec
         dy0 = new_dy

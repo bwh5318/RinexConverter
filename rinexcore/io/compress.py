@@ -109,109 +109,101 @@ def unlzw(data):
     total_bits = len(stream) * 8
     first_free = 257 if block else 256
     table = [bytes([i]) for i in range(256)] + ([b""] if block else [])
-    nbits, pos, seg_start = 9, 0, 0
+    ntab = len(table)
+    nbits = 9
     prev = None
     out = bytearray()
     limit = 1 << maxbits
-
-    while pos + nbits <= total_bits:
-        byte, bit = divmod(pos, 8)
-        word = int.from_bytes(stream[byte:byte + 3], "little")
-        code = (word >> bit) & ((1 << nbits) - 1)
-        pos += nbits
-        if block and code == 256:
-            group = nbits * 8
-            pos = seg_start + -(-(pos - seg_start) // group) * group
-            seg_start = pos
-            del table[first_free:]
-            nbits, prev = 9, None
-            continue
-        if prev is None:
-            if code >= 256:
-                raise CorruptError(".Z stream has a bad first code", rule="IO.LZW")
-            entry = table[code]
-        elif code < len(table):
-            entry = table[code]
-            if len(table) < limit:
-                table.append(table[prev] + entry[:1])
-        elif code == len(table):
-            entry = table[prev] + table[prev][:1]
-            table.append(entry)
-        else:
-            raise CorruptError(f".Z stream has a bad code {code} at bit {pos}", rule="IO.LZW")
-        out += entry
-        prev = code
-        if len(table) > (1 << nbits) - 1 and nbits < maxbits:
-            group = nbits * 8
-            pos = seg_start + -(-(pos - seg_start) // group) * group
-            seg_start = pos
-            nbits += 1
+    # Codes are read a group at a time: a group of 8 codes of one width is that many bytes,
+    # and every group starts on a byte (the stream starts with one; a CLEAR or a width change
+    # skips to the end of the group it is in, and a group is a whole number of bytes), so one
+    # int.from_bytes holds the group's 8 codes (it was one division, slice and conversion per
+    # code). g is the group's first byte; after its codes, or a skip, the next group follows it.
+    g = 0
+    while True:
+        ncodes = min(8, (total_bits - 8 * g) // nbits)      # those wholly inside the stream
+        if ncodes <= 0:
+            break
+        width = nbits
+        word = int.from_bytes(stream[g:g + width], "little")
+        mask = (1 << width) - 1
+        for j in range(ncodes):
+            code = (word >> (j * width)) & mask
+            if block and code == 256:
+                del table[first_free:]
+                ntab = first_free
+                nbits, prev = 9, None
+                break
+            if prev is None:
+                if code >= 256:
+                    raise CorruptError(".Z stream has a bad first code", rule="IO.LZW")
+                entry = table[code]
+            elif code < ntab:
+                entry = table[code]
+                if ntab < limit:
+                    table.append(table[prev] + entry[:1])
+                    ntab += 1
+            elif code == ntab:
+                entry = table[prev] + table[prev][:1]
+                table.append(entry)
+                ntab += 1
+            else:
+                raise CorruptError(f".Z stream has a bad code {code} at bit {8 * g + (j + 1) * width}",
+                                   rule="IO.LZW")
+            out += entry
+            prev = code
+            if ntab > (1 << nbits) - 1 and nbits < maxbits:
+                nbits += 1
+                break
+        g += width
     return bytes(out)
 
 
-class _BitWriter:
-    __slots__ = ("out", "acc", "nacc", "seg_bits")
-
-    def __init__(self):
-        self.out = bytearray()
-        self.acc = 0
-        self.nacc = 0
-        self.seg_bits = 0
-
-    def put(self, code, nbits):
-        self.acc |= code << self.nacc
-        self.nacc += nbits
-        self.seg_bits += nbits
-        while self.nacc >= 8:
-            self.out.append(self.acc & 0xFF)
-            self.acc >>= 8
-            self.nacc -= 8
-
-    def pad_group(self, nbits):
-        """Pad with zero bits to the end of the current 8-code group."""
-        group = nbits * 8
-        rem = self.seg_bits % group
-        if rem:
-            self.put(0, group - rem)
-        self.seg_bits = 0
-
-    def flush(self):
-        if self.nacc:
-            self.out.append(self.acc & 0xFF)
-            self.acc = 0
-            self.nacc = 0
-        return bytes(self.out)
-
-
 def lzw(data, maxbits=16):
-    """Encode as Unix compress (.Z), block mode, with compress(1)'s ratio check."""
-    w = _BitWriter()
+    """Encode as Unix compress (.Z), block mode, with compress(1)'s ratio check.
+
+    Codes are packed a group at a time: the 8 codes of a group (of one width, so the group is
+    that many bytes, and it starts on a byte) collect in an integer that is written whole; a
+    width change or a CLEAR writes the group early, its missing codes zero bits (the padding
+    the reader skips); the last group is cut to the bytes its codes take. (The bytes are those
+    of the bit-at-a-time writer this replaced: tests/unit/test_speed_equivalence.py.)"""
     header = Z_MAGIC + bytes([0x80 | maxbits])
     if not data:
         return header
+    out = bytearray()
     limit = 1 << maxbits
     table = {}
+    get = table.get
     free = 257
     nbits = 9
+    top = (1 << nbits) - 1           # a free code above it widens the codes
     checkpoint = 10000
     ratio = 0
-    in_count = 0
     out_bits_at_clear = 0
     total_out_bits = 0
+    acc = 0                          # the current group's codes, LSB first
+    k = 0                            # and how many
     ent = data[0]
     in_count = 1
     for c in data[1:]:
         in_count += 1
         key = (ent << 8) | c
-        code = table.get(key)
+        code = get(key)
         if code is not None:
             ent = code
             continue
-        w.put(ent, nbits)
+        acc |= ent << (k * nbits)
+        k += 1
+        if k == 8:
+            out += acc.to_bytes(nbits, "little")
+            acc = k = 0
         total_out_bits += nbits
-        if free > (1 << nbits) - 1 and nbits < maxbits:
-            w.pad_group(nbits)
+        if free > top and nbits < maxbits:
+            if k:
+                out += acc.to_bytes(nbits, "little")
+                acc = k = 0
             nbits += 1
+            top = (1 << nbits) - 1
         if free < limit:
             table[key] = free
             free += 1
@@ -223,17 +215,21 @@ def lzw(data, maxbits=16):
                 ratio = rat
             else:
                 ratio = 0
-                w.put(256, nbits)
-                w.pad_group(nbits)
+                acc |= 256 << (k * nbits)              # CLEAR, then the group's padding
+                out += acc.to_bytes(nbits, "little")
+                acc = k = 0
                 table.clear()
                 free = 257
                 nbits = 9
+                top = (1 << nbits) - 1
                 out_bits_at_clear = total_out_bits
                 in_count = 0
                 checkpoint = 10000
         ent = c
-    w.put(ent, nbits)
-    return header + w.flush()
+    acc |= ent << (k * nbits)
+    k += 1
+    out += acc.to_bytes((k * nbits + 7) // 8, "little")
+    return header + bytes(out)
 
 
 def unwrap(data):

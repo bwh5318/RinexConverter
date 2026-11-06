@@ -235,7 +235,8 @@ class Corrections:
         a header repair, reported, refused under --strict). Written into the record itself, so
         every target, the source's own version too, gets the same week. BDS weeks (BDUT: GPS
         weeks in 3.02, from 2006 in 3.03+) and GLONASS (T and W zero) are left as they are."""
-        weeks = sorted((datetime.date(*r.time[:3]) - GPS0.date()).days // 7
+        day0 = GPS0.date()                  # (once, not per record)
+        weeks = sorted((datetime.date(*r.time[:3]) - day0).days // 7
                        for r in f.records if r.kind == "EPH")
         ref = weeks[len(weeks) // 2] if weeks else None
         self._bds_weeks(f, items, ref)

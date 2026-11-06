@@ -9,6 +9,7 @@ With several inputs the highest code wins.
 import argparse
 import json
 import os
+import re
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -101,38 +102,123 @@ def expand(inputs):
     return out
 
 
+def _day_of(p):
+    if p["style"] == "short":
+        yy = int(p["yy"])
+        return (1900 + yy if yy >= 80 else 2000 + yy, int(p["ddd"]))
+    return (int(p["y"]), int(p["ddd"]))
+
+
+_NAV_DAY = {}         # file name -> day of a GLONASS-capable nav file name, or None (not one)
+_NAV_DAY_MAX = 100_000
+
+
+def _nav_day(name):
+    """The (year, day) of a file name that names a navigation file with GLONASS records
+    (RINEX 2 'g' or mixed 'p', RINEX 3/4 *_RN / *_MN), or None. It depends on the name alone,
+    so it is cached: sibling_nav used to parse every name of the folder once per input, which
+    grows with the square of a batch's size (Sol's optimisation plan, 2026-11-03)."""
+    try:
+        return _NAV_DAY[name]
+    except KeyError:
+        pass
+    from rinexcore import names
+    p = names.parse(names.strip_compression(name))
+    day = None
+    if p and (p["t"].lower() in ("g", "p") if p["style"] == "short" else p["tt"].upper() in ("RN", "MN")):
+        day = _day_of(p)
+    if len(_NAV_DAY) >= _NAV_DAY_MAX:
+        _NAV_DAY.clear()
+    _NAV_DAY[name] = day
+    return day
+
+
 def sibling_nav(path):
     """Same-day navigation files with GLONASS records next to an observation file
-    (RINEX 2 'g' or mixed, RINEX 3/4 *_RN / *_MN), as GLONASS channel companions."""
+    (RINEX 2 'g' or mixed, RINEX 3/4 *_RN / *_MN), as GLONASS channel companions. The folder
+    is listed for every input, so the companions are those it holds at that moment (a listing
+    kept while the folder's modification time stayed the same missed a file added within the
+    time's resolution: Sol, xhigh review of the optimisation)."""
     from rinexcore import names
     me = names.parse(names.strip_compression(os.path.basename(path)))
     if not me:
         return []
-    if me["style"] == "short":
-        yy = int(me["yy"])
-        day = (1900 + yy if yy >= 80 else 2000 + yy, int(me["ddd"]))
-    else:
-        day = (int(me["y"]), int(me["ddd"]))
-    out = []
+    day = _day_of(me)
     folder = os.path.dirname(os.path.abspath(path))
     try:
-        listing = sorted(os.listdir(folder))
+        listing = os.listdir(folder)
     except OSError:
         return []                          # an unreadable folder offers no companions
-    for name in listing:
-        p = names.parse(names.strip_compression(name))
-        if not p:
-            continue
-        if p["style"] == "short":
-            yy = int(p["yy"])
-            d = (1900 + yy if yy >= 80 else 2000 + yy, int(p["ddd"]))
-            ok = p["t"].lower() in ("g", "p")
-        else:
-            d = (int(p["y"]), int(p["ddd"]))
-            ok = p["tt"].upper() in ("RN", "MN")
-        if ok and d == day:
-            out.append(os.path.join(folder, name))
-    return out
+    return [os.path.join(folder, n) for n in sorted(n for n in listing if _nav_day(n) == day)]
+
+
+# Peak memory of one conversion, as a multiple of the decoded RINEX size (README "Memory and
+# speed": about 2 to 2.5), and the decoded size as a multiple of the file size (a conservative
+# guess from the corpus: gzip/.Z/bz2/zip about 8x, Hatanaka about 4x on top of that).
+_PEAK_FACTOR = 2.5
+
+
+def _estimated_peak(path):
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return 0
+    low = os.path.basename(path).lower()
+    crx = ".crx" in low or re.search(r"\.\d\dd(\.|$)", low) is not None    # Hatanaka: .crx, .YYd
+    packed = low.endswith((".gz", ".z", ".bz2", ".zip"))
+    return int(size * (8 if packed else 1) * (4 if crx else 1) * _PEAK_FACTOR)
+
+
+def _physical_memory():
+    """Bytes of physical memory, or None if the system does not say (standard library only)."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            m = MEMORYSTATUSEX()
+            m.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                return int(m.ullTotalPhys)
+            return None
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def run_parallel(paths, opts, a, jobs, budget=None):
+    """run_input for every path in `jobs` worker processes; the results in input order, as a
+    serial run gives them. The largest inputs start first, so a long one does not finish last,
+    and a new input is started only while the estimated peak memory of those running stays
+    within the budget (70% of physical memory), which makes paging on a batch of large files
+    less likely (the laptop paged on the 24 h 1 Hz file; Sol's plan, 2026-11-03). It is a
+    heuristic: the decoded size is guessed from fixed compression ratios and other programs'
+    memory is not counted, so it cannot rule paging out. One input always runs, however large. Which input of two with the same output name is written
+    first is not fixed in a parallel run, as before (the second gets 'exists' without --force)."""
+    from concurrent.futures import FIRST_COMPLETED, wait
+    if budget is None:
+        phys = _physical_memory()
+        budget = int(phys * 0.7) if phys else None
+    order = sorted(range(len(paths)), key=lambda i: -_estimated_peak(paths[i]))
+    peak = {i: _estimated_peak(paths[i]) for i in order}
+    results = [None] * len(paths)
+    running = {}
+    with ProcessPoolExecutor(max_workers=jobs) as ex:
+        for i in order:
+            while running and (len(running) >= jobs or (
+                    budget is not None and sum(peak[j] for j in running.values()) + peak[i] > budget)):
+                done, _ = wait(running, return_when=FIRST_COMPLETED)
+                for f in done:
+                    results[running.pop(f)] = f.result()
+            running[ex.submit(run_input, paths[i], opts, a.out, a.report, a.force)] = i
+        for f in list(running):
+            results[running.pop(f)] = f.result()
+    return [r for rs in results for r in rs]
 
 
 def run_input(path, opts, out_dir, report_dir, force):
@@ -298,9 +384,7 @@ def main(argv=None):
         paths = paths[:1]
     worst = "converted"
     if a.jobs > 1 and len(paths) > 1:
-        with ProcessPoolExecutor(max_workers=a.jobs) as ex:
-            futs = [ex.submit(run_input, p, opts, a.out, a.report, a.force) for p in paths]
-            results = [r for f in futs for r in f.result()]
+        results = run_parallel(paths, opts, a, a.jobs)
     else:
         results = [r for p in paths for r in run_input(p, opts, a.out, a.report, a.force)]
     for path, outcome, msg, written in results:

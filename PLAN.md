@@ -530,7 +530,15 @@ section. Its findings are classed as header-only (repairable) or data-level.
 
 - The whole corpus, all-to-all, with the same-day nav as companion.
   - **Outcome:** every run ends `converted`. No crashes, no `refused-*` and no
-    `converted-with-removal`.
+    `converted-with-removal`, except where the input itself decides the outcome (the user's
+    decision of 2026-11-03; docs/DECISIONS.md "rinexconv 1.0 close-out"):
+    - `refused-corrupt` for the three damaged corpus inputs, each of which `--lenient` reads:
+      mate1800.03m (met values out of their F7.1 columns), DARW00AUS 2020 3.03 met (epochs in
+      the RINEX 2 layout) and BRDX00DLR 2020 "4.00" nav (a pre-release RINEX 4 format);
+    - `refused-not-representable` where the target defines no record for any of the input's
+      data: BeiDou-, Galileo- or NavIC-only nav files to RINEX 2, BeiDou- and NavIC-only ones
+      to 3.00/3.01, and NavIC-only to 3.02.
+    These are 72 (file, target) cells, and a run must show exactly these and no other.
   - **Output:** 0 invalid files, 0 unexplained or over-claimed differences, 0 losses outside
     the allowed list.
 - The two other outcomes are tested on their own:

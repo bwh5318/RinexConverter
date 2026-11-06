@@ -3,6 +3,99 @@
 Newest first. Each entry says what was decided, why, and whether the user still has to
 confirm it. "Verified" means checked by a test or a corpus run; "assumed" means not yet.
 
+## 2026-11-06 — speed work: 1.7-1.9x faster, not one byte changed
+
+The user asked: "try to optimize the speed of the conversions as much as you can. review with sol on
+xhigh", and to ask Codex Sol for a plan first. Rule for the work: no output, report or refusal byte may
+change, for any input; every check still runs.
+
+**What changed** (each fast path falls back to the old code on anything it does not accept):
+- Hatanaka (`rinexcore/io/hatanaka.py`): column-form decode and encode fast paths; `_FAST` switch.
+- Validator (`rinexcore/validate.py`): fields screened 1024 lines at a time with big-integer lanes, the
+  regex only for lines the screen flags; nav and met fast paths.
+- Obs path: `obs.py` field check without a regex, no second field check after a complete first read,
+  satellite-name cache; `obsconv.py` survey by field masks, whole-record copies where no rule can apply;
+  `.Z` a code group at a time (`compress.py`); coalesced spill writes (`spool.py`); `join_lines`.
+- Nav/met: memos of checked tokens, epochs and headers, a `fmt_token` fast path and per-file format cache
+  (`nav.py`), `met.py` fast paths, `_fit_positions` cached (`navconv.py`).
+- CLI batches: the parse of each nav companion name is cached (the folder is still listed for every input);
+  `--jobs` starts the largest inputs first and holds back a new one while the estimated peaks of those
+  running pass 70% of physical memory (a heuristic, not a guarantee; README).
+- Sol's plan added the batch ideas and the satellite-name cache, and measured the `fmt_token` gain.
+
+**Speed** (desktop, quiet machine, each conversion in a fresh process, best of 3, whole conversion):
+
+| File | To | Before | After | |
+|---|---|---|---|---|
+| AC2300USA 2023/180 3.04 `.crx.gz` (90 MB of RINEX) | 3.05 | 14.4 s | 8.2 s | 1.75x |
+| same | 2.11 | 14.2 s | 8.4 s | 1.69x |
+| same | 4.02 Hatanaka | 20.1 s | 11.6 s | 1.73x |
+| AUCK00NZL 3.05 `.rnx.gz` | 3.05 / 2.11 | 3.2 / 3.3 s | 1.7 / 1.9 s | 1.85x / 1.79x |
+| stj31800.17d.Z (2.11 Hatanaka) | 2.11 Hatanaka | 7.8 s | 4.1 s | 1.88x |
+| UNBD00CAN 4.02 `.crx.gz` | 3.05 | 6.2 s | 3.5 s | 1.78x |
+| BRD400DLR 4.02 nav | 3.05 / 2.11 | 2.1 / 1.6 s | 1.2 / 0.95 s | 1.75x / 1.67x |
+| BRDC00IGS 3.04 nav | 4.02 | 2.7 s | 1.5 s | 1.74x |
+| brdc2740.26n (GPS 2.00) / hueg1800.15m (met) | 4.02 / 3.05 | 0.10 / 0.25 s | 0.08 / 0.19 s | 1.25x / 1.30x |
+
+Corpus run medians (12 jobs; part of the run shared the machine with an 11-job digest, so these are
+low): obs 5.2 -> 9.3, nav 2.5 -> 6.6, met 3.1 -> 3.1 decoded MB/s. The budgets (2.6, 1.2, 1.5) are left as
+they were: a floor, not a target.
+
+**Proof that nothing changed** (verified):
+- `tools/digest_outputs.py` (new): sha256 of every output and report (refusals: outcome and message) for
+  every corpus file x 11 versions x plain / Hatanaka / input wrappers kept: 13,915 conversions. The
+  original code (commit 361218b) against the reviewed code: 0 differ; against the final code: 0 differ.
+- The corpus run on the final code: 5,280 conversions, every row (outcome, losses, repairs, assumptions,
+  token problems, loss violations, idempotence, round trips, wrappers, messages) identical to round 41's
+  run; 0 loss-table violations, token problems or idempotence failures; the 72 by-design refusals.
+- Each area's own differential tests against the old code (fuzzed CRX and RINEX, damaged nav and met,
+  validator findings over ~19,000 inputs, the CRX2RNX oracle 299/299): 0 mismatches. New unit tests:
+  `test_speed_equivalence.py`, `test_hatanaka_speed_equivalence.py`, `test_navmet_fastpaths.py`,
+  `test_validate_fast.py`, `test_cli_batch.py`. Suite: 1,108 passed, 27 skipped, 13 xfailed.
+
+**Review.** Codex Sol 6.1 xhigh: 7/10, two blockers, both fixed; verify 9/10, confident "no new output,
+report, refusal, warning, or ordering difference".
+1. The batch companion index was kept while the folder's modification time stayed the same; a nav file
+   added within that time's resolution (FAT: 2 s; network shares) was missed and the conversion refused.
+   Now the folder is listed for every input, as before; only name parsing is cached.
+2. The survey kept one entry per distinct field mask: on a file whose records hold almost all distinct
+   masks (Sol's generator), pass 1 peaked at 2.72 times the file beyond the loaded input (the original:
+   1.44). Past 64 masks per (type list, satellite) they are now folded into its counts (1.47). The survey
+   is identical with folding at every mask, at 64 and never, on all 305 corpus obs files.
+- Memory test: the bound on peak / (input + output) was 4, now 2.6 (original 2.20 / 1.86 to 2.11 / 4.02;
+  final 2.31 / 2.06: a fixed 0.2-0.7 MB more that does not grow with the file).
+- Known trade-off: on that synthetic all-distinct-mask file, reading and pass 1 take 0.58 s against the
+  original's 0.42 s; the whole conversion is still faster (1.45 s against 1.67 s).
+
+## 2026-11-03 — rinexconv 1.0 close-out (M7, M8)
+
+The user chose to close out rinexconv before starting rinexqc ("Close out first"), after being
+told what was left.
+
+- **Acceptance (PLAN §4), amended with the user's agreement.** PLAN asked that every corpus run
+  end `converted`. Every run since round 8 has shown the same 72 refused (file, target) cells, and
+  each is set by the input: `refused-corrupt` for three damaged files that `--lenient` reads
+  (mate1800.03m, met values out of their F7.1 columns; DARW00AUS 2020 3.03 met, epochs in the
+  RINEX 2 layout; BRDX00DLR 2020 "4.00" nav, a pre-release RINEX 4 format), and
+  `refused-not-representable` where the target defines no record for any of the input's data
+  (BeiDou-, Galileo- or NavIC-only nav to RINEX 2; BeiDou- and NavIC-only to 3.00/3.01; NavIC-only
+  to 3.02). PLAN §4 now lists them; a run must show exactly these.
+- **The two other outcomes on the corpus** (`tools/outcome_check.py`, new): the 51 corpus obs
+  files with GLONASS data in a version before 3.02, to each target from 3.02 on, without the
+  same-day nav companion: 357/357 `refused-missing-information`, each naming the GLONASS
+  channels; with `--drop-unresolvable`: 357/357 `converted-with-removal`, GLONASS claimed removed
+  (`system-removed-unresolvable:R`), no GLONASS record left, the independent checks clean, and the
+  loss table rejects the same claim when the option was not given.
+- **Performance budgets** (PLAN §4; docs/ENVIRONMENT.md): from the final corpus run on the
+  desktop, the per-process medians obs 5.2, nav 2.5, met 3.1 decoded MB/s under a 12-job run; the
+  budget is half of each (2.6, 1.2, 1.5), printed against the medians by `tools/corpus_run.py`
+  after every run. Memory: about 2-2.5 times the decoded file, linear (`test_memory.py`).
+- **Oracles:** CRX2RNX and RNX2CRX results are archived for every corpus obs file
+  (`tests/oracle/`); gfzrnx, RTKLIB and teqc are not available (the user's answers of 2026-11-01),
+  so no disagreement with them is open.
+- **M8:** `CLAUDE.md` rewritten for the current state (it still described the laptop hand-off);
+  docs/ENVIRONMENT.md has a desktop section. Next: rinexqc, milestone Q1.
+
 ## 2026-11-03 — Codex Astra (xhigh) review fixes
 
 Reviewer: Codex Astra (gpt-6-astra, xhigh), the user's choice ("run it by codex astra on xhigh");

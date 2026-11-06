@@ -1,4 +1,52 @@
-# Environment (laptop)
+# Environment
+
+## Desktop (current home, since 2026-11-02)
+
+The project lives at `E:\pythontests\RINEXConvert_Analysis`, with the CDDIS login folder beside it
+(`E:\pythontests\RINEXConvert_Analysis_secrets\`, readable by the user's account only). It came
+back from the laptop on the F: transfer drive; every file was sha256-checked after the copy.
+
+- **Machine:** Intel Core i7-13700F (16 cores, 24 threads), 31.8 GB RAM, Windows 11.
+- **Python:** Anaconda at `C:\anaconda\python.exe`, Python 3.12.7. The code keeps to Python 3.10
+  syntax and passes on 3.12 here and on 3.14 on the laptop.
+- **Packages for rinexqc** (PLAN §0: only rinexqc may use them), all from Anaconda's own
+  channel, none from pypi: numpy 1.26.4, scipy 1.13.1, plotly 5.24.1, pandas 2.2.2, numba 0.60.0;
+  requests 2.32.3 (rinexcore/cddis.py and tools/ only).
+- **Oracles:** RNXCMP 4.2.0 (`tools/oracles/rnxcmp/`: RNX2CRX.exe, CRX2RNX.exe; ORACLES.md) and
+  CRX2RNX in `reference/tools/rnxcmp-4.2.0/`. No gfzrnx, RTKLIB, teqc or Anubis.
+
+### Performance budgets (set 2026-11-03, PLAN §4 "Performance")
+
+Measured on the final full corpus run (corpus_r41: every file to all 11 versions, 12 worker
+processes at once, so each figure is one process under load). Throughput is decoded RINEX MB per
+second of the conversion itself, without loading, checks or writing:
+
+| Kind | Conversions | p10 | median | p90 | Largest file |
+|---|---|---|---|---|---|
+| obs | 3,355 | 2.9 MB/s | 5.2 MB/s | 8.9 MB/s | 89.9 MB in 7.9 s |
+| nav | 1,149 | 1.9 MB/s | 2.5 MB/s | 3.4 MB/s | 13.0 MB in 2.9 s |
+| met | 364 | 1.3 MB/s | 3.1 MB/s | 6.0 MB/s | 0.5 MB in 0.1 s |
+
+After the speed work of 2026-11-03 to 11-06 (docs/DECISIONS.md; corpus_opt, the same run, part of it
+beside an 11-job digest run, so these are on the low side):
+
+| Kind | Conversions | p10 | median | p90 | Largest file |
+|---|---|---|---|---|---|
+| obs | 3,355 | 6.0 MB/s | 9.3 MB/s | 18.9 MB/s | 89.9 MB in 6.2 s |
+| nav | 1,149 | 4.8 MB/s | 6.6 MB/s | 10.2 MB/s | 13.0 MB in 1.1 s |
+| met | 400 | 1.3 MB/s | 3.1 MB/s | 4.5 MB/s | 0.5 MB in 0.1 s |
+
+**Budgets:** the median per kind must stay at or above half of the first table: obs 2.6, nav 1.2, met 1.5
+MB/s (left as they were after the speed work: a floor, not a target). `tools/corpus_run.py` prints the medians against the budgets after every run and marks one
+that falls short ("BELOW BUDGET"). **Memory:** a conversion holds about 2 to 2.5 times the decoded
+file (the 24 h 1 Hz test: 1.6 GB of RINEX, peak 2.5-3.7 GB on the laptop; README "Memory and
+speed"); `tests/unit/test_memory.py` asserts that the peak grows linearly with the file size, stays
+below 2.6 times input + output, and that pass 1's per-satellite field-mask table stays bounded on a
+file whose records hold almost all distinct masks.
+A whole corpus run (5,280 conversions with every check, idempotence leg, round trip and wrapper
+leg) takes 45-80 minutes here with 12 jobs, depending on what else the machine is doing.
+
+# Laptop (2026-10-30 to 2026-11-01)
 
 Recorded 2026-10-30 by the first Claude Code session on the laptop.
 

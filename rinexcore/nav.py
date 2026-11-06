@@ -23,6 +23,9 @@ from .obs import year4
 
 V2_SYS = {"N": "G", "G": "R", "H": "S", "L": "E", "E": "E", "C": "C", "J": "J", "I": "I"}
 _EXP = re.compile(r"[DdEe]")
+# (fmt_token) the first exponent letter followed by a sign and two characters, the second not a
+# sign: exactly the tokens whose exponent fmt_token's general steps leave as written
+_STD_EXP = re.compile(r"([^DdEe]*)[DdEe]([+-][^+-].)", re.S)
 _NUM = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([DdEe][+-]?\d+)?$")
 
 
@@ -82,14 +85,6 @@ def check_token(tok, lineno, column):
         raise CorruptError(f"bad navigation number {tok!r}", line=lineno, column=column,
                            rule="NAV.NUMBER")
     return tok
-
-
-def _fields(line, start, n, lineno):
-    out = []
-    for k in range(n):
-        a = start + 19 * k
-        out.append(check_token(line[a:a + 19].strip(), lineno, a + 1))
-    return out
 
 
 def _int(s, what, lineno, col):
@@ -320,20 +315,60 @@ def read_nav(lines, info, eol="lf", lenient=False):
     return f
 
 
-def _blank_note(f, lines, i):
-    if any(ln.strip() for ln in lines[i:]):
+def _blank_note(f, lines, i, last):
+    """last: [] until the first blank line, then [index of the file's last non-blank line]
+    (any(ln.strip() for ln in lines[i:]) at every blank line was quadratic in them)."""
+    if not last:
+        last.append(next((k for k in range(len(lines) - 1, -1, -1) if lines[k].strip()), -1))
+    if last[0] >= i:
         f.notes.append({"rule": "NAV.BLANKLINE", "message": "blank line skipped", "line": i + 1,
                         "repair": True})
+
+
+# Speed (the readers run twice per conversion: input, and the output check): a navigation file
+# repeats most of its 19-column fields (zeros, spares, IODs, weeks, health: about 78 % of the
+# fields of BRDC00IGS 3.04 and BRD400DLR 4.02) and many epochs, so each reader keeps per-file
+# memos from a field's raw text to its checked token (check_token of the stripped text) and from
+# an epoch's text to its checked tuple. Only text that passed every check is memoised, so a bad
+# field or epoch still raises at its own line and column, in the same order as before; equal
+# texts give equal results, and the tuples and strings shared between records are immutable.
+# `not s or s.isspace()` is `not s.strip()` (one Unicode whitespace test, without the copy).
+def _take(line, starts, lineno, memo, out):
+    """Append the checked tokens of the 19-column fields of `line` starting at `starts`."""
+    get = memo.get
+    for a in starts:
+        raw = line[a:a + 19]
+        tok = get(raw)
+        if tok is None:
+            tok = memo[raw] = check_token(raw.strip(), lineno, a + 1)
+        out.append(tok)
+
+
+_V2_CONT = (3, 22, 41, 60)          # 3X,4D19.12
+_V34_CONT = (4, 23, 42, 61)         # 4X,4D19.12
+_V34_FIRST = (23, 42, 61)           # after A1,I2.2,1X,I4,5(1X,I2.2) or 4X,I4,5(1X,I2.2)
+
+
+def _v2_epoch(line, off, lineno):
+    yy = _int(line[off + 3:off + 5], "year", lineno, 4)
+    t = (year4(yy), _int(line[off + 6:off + 8], "month", lineno, 7),
+         _int(line[off + 9:off + 11], "day", lineno, 10),
+         _int(line[off + 12:off + 14], "hour", lineno, 13),
+         _int(line[off + 15:off + 17], "minute", lineno, 16),
+         _sec(line[off + 17:off + 22], lineno, 18))
+    return _check_date(t, lineno)
 
 
 def _read_v2(f, lines, i):
     n = len(lines)
     dsys = V2_SYS.get(f.ftype, "G")
+    memo, epochs, last = {}, {}, []
+    get = memo.get
     while i < n:
         line = lines[i]
         lineno = i + 1
-        if not line.strip():
-            _blank_note(f, lines, i)
+        if not line or line.isspace():
+            _blank_note(f, lines, i, last)
             i += 1
             continue
         if not line[0:2].strip():
@@ -349,24 +384,26 @@ def _read_v2(f, lines, i):
             sysc = dsys
             prn = _int(line[0:2], "PRN", lineno, 1)
             off = 0
-        yy = _int(line[off + 3:off + 5], "year", lineno, 4)
-        t = (year4(yy), _int(line[off + 6:off + 8], "month", lineno, 7),
-             _int(line[off + 9:off + 11], "day", lineno, 10),
-             _int(line[off + 12:off + 14], "hour", lineno, 13),
-             _int(line[off + 15:off + 17], "minute", lineno, 16),
-             _sec(line[off + 17:off + 22], lineno, 18))
-        _check_date(t, lineno)
-        vals = _fields(line, off + 22, 3, lineno)
+        key = line[off + 3:off + 22]                # the epoch's columns (_v2_epoch)
+        t = epochs.get(key)
+        if t is None:
+            t = epochs[key] = _v2_epoch(line, off, lineno)
+        vals = []
+        _take(line, (off + 22, off + 41, off + 60), lineno, memo, vals)
         i += 1
         nl = 1
         while i < n:
             nxt = lines[i]
-            if not nxt.strip():
+            if not nxt or nxt.isspace() or nxt[0:2].strip():
                 break
-            if nxt[0:2].strip():
-                break
-            nxt = nxt.ljust(79)
-            vals.extend(_fields(nxt, 3, 4, i + 1))
+            # (the fields of a short line: its slices are shorter, the stripped tokens the same,
+            # so no ljust)
+            for a in _V2_CONT:
+                raw = nxt[a:a + 19]
+                tok = get(raw)
+                if tok is None:
+                    tok = memo[raw] = check_token(raw.strip(), i + 1, a + 1)
+                vals.append(tok)
             i += 1
             nl += 1
         f.records.append(NavRecord("EPH", f"{sysc}{prn:02d}", None, "", t, vals, "", lineno, nl))
@@ -374,6 +411,15 @@ def _read_v2(f, lines, i):
 
 def _v3_epoch(line, lineno, start):
     return _check_date(_v3_epoch_raw(line, lineno, start), lineno)
+
+
+def _v3_epoch_memo(line, lineno, epochs):
+    """_v3_epoch(line, lineno, 4), memoised on the epoch's columns 5-23."""
+    key = line[4:23]
+    t = epochs.get(key)
+    if t is None:
+        t = epochs[key] = _v3_epoch(line, lineno, 4)
+    return t
 
 
 def _v3_epoch_raw(line, lineno, start):
@@ -387,40 +433,70 @@ def _v3_epoch_raw(line, lineno, start):
 
 def _read_v3(f, lines, i):
     n = len(lines)
+    memo, epochs, sats, last = {}, {}, {}, []
+    get = memo.get
     while i < n:
         line = lines[i]
         lineno = i + 1
-        if not line.strip():
-            _blank_note(f, lines, i)
+        if not line or line.isspace():
+            _blank_note(f, lines, i, last)
             i += 1
             continue
         if not line[0:1].isalpha():
             raise CorruptError("expected an SV / EPOCH / SV CLK line", line=lineno, column=1,
                                rule="NAV.RECORD.START")
         line = line.ljust(80)
-        sat = line[0:1].upper() + f"{_int(line[1:3], 'satellite number', lineno, 2):02d}"
-        t = _v3_epoch(line, lineno, 4)
-        vals = _fields(line, 23, 3, lineno)
+        sat = sats.get(line[0:3])
+        if sat is None:
+            sat = sats[line[0:3]] = line[0:1].upper() + f"{_int(line[1:3], 'satellite number', lineno, 2):02d}"
+        t = _v3_epoch_memo(line, lineno, epochs)
+        vals = []
+        _take(line, _V34_FIRST, lineno, memo, vals)
         i += 1
         nl = 1
         while i < n:
             nxt = lines[i]
-            if not nxt.strip() or nxt[0:1] != " ":
+            if nxt[0:1] != " " or nxt.isspace():
                 break
-            nxt = nxt.ljust(80)
-            vals.extend(_fields(nxt, 4, 4, i + 1))
+            for a in _V34_CONT:                 # (no ljust: as in _read_v2)
+                raw = nxt[a:a + 19]
+                tok = get(raw)
+                if tok is None:
+                    tok = memo[raw] = check_token(raw.strip(), i + 1, a + 1)
+                vals.append(tok)
             i += 1
             nl += 1
         f.records.append(NavRecord("EPH", sat, None, "", t, vals, "", lineno, nl))
 
 
+def _v4_head(line, lineno):
+    """(kind, sat, msg, sub) of a '>' record header line."""
+    tok = line[1:].split()
+    if len(tok) < 3:
+        raise CorruptError("incomplete record header", line=lineno, rule="NAV.RECORD.HEAD")
+    kind = tok[0].upper()
+    s = tok[1]
+    if kind not in ("EPH", "STO", "EOP", "ION"):
+        raise CorruptError(f"unknown record type {kind!r}", line=lineno, column=3,
+                           rule="NAV.RECORD.TYPE")
+    if len(s) == 1:
+        sat = s.upper() + "  "
+    elif len(s) == 3 and s[0].isalpha() and s[1:].strip().isdecimal():
+        sat = s[0].upper() + f"{int(s[1:]):02d}"
+    else:
+        raise CorruptError(f"bad satellite {s!r}", line=lineno, column=7, rule="NAV.RECORD.HEAD")
+    return kind, sat, tok[2], " ".join(tok[3:])
+
+
 def _read_v4(f, lines, i, lenient=False):
     n = len(lines)
+    memo, epochs, heads, last = {}, {}, {}, []
+    get = memo.get
     while i < n:
         line = lines[i]
         lineno = i + 1
-        if not line.strip():
-            _blank_note(f, lines, i)
+        if not line or line.isspace():
+            _blank_note(f, lines, i, last)
             i += 1
             continue
         if line[0:1] != ">":
@@ -432,22 +508,10 @@ def _read_v4(f, lines, i, lenient=False):
             f.notes.append({"rule": "NAV.V4.DRAFT-HEADER", "line": lineno, "repair": True,
                             "message": "pre-release RINEX 4 record header read as '> EPH'"})
             line = f"> EPH {m.group(1)}{m.group(2)} {m.group(3)}"
-        tok = line[1:].split()
-        if len(tok) < 3:
-            raise CorruptError("incomplete record header", line=lineno, rule="NAV.RECORD.HEAD")
-        kind = tok[0].upper()
-        s = tok[1]
-        if kind not in ("EPH", "STO", "EOP", "ION"):
-            raise CorruptError(f"unknown record type {kind!r}", line=lineno, column=3,
-                               rule="NAV.RECORD.TYPE")
-        if len(s) == 1:
-            sat = s.upper() + "  "
-        elif len(s) == 3 and s[0].isalpha() and s[1:].strip().isdecimal():
-            sat = s[0].upper() + f"{int(s[1:]):02d}"
-        else:
-            raise CorruptError(f"bad satellite {s!r}", line=lineno, column=7, rule="NAV.RECORD.HEAD")
-        msg = tok[2]
-        sub = " ".join(tok[3:])
+        h = heads.get(line)                     # (memoised as the fields are)
+        if h is None:
+            h = heads[line] = _v4_head(line, lineno)
+        kind, sat, msg, sub = h
         i += 1
         if i >= n:
             raise CorruptError("file ends after a record header", line=n, rule="NAV.TRUNCATED")
@@ -457,25 +521,31 @@ def _read_v4(f, lines, i, lenient=False):
             if body0[0:1].upper() != sat[0]:
                 raise CorruptError("EPH body does not start with the satellite", line=b0, column=1,
                                    rule="NAV.RECORD.BODY")
-            t = _v3_epoch(body0, b0, 4)
-            vals = _fields(body0, 23, 3, b0)
+            t = _v3_epoch_memo(body0, b0, epochs)
+            vals = []
+            _take(body0, _V34_FIRST, b0, memo, vals)
             extra = ""
         else:
-            t = _v3_epoch(body0, b0, 4)
+            t = _v3_epoch_memo(body0, b0, epochs)
             if kind == "STO":
                 vals = ["", "", ""]
                 extra = body0[23:80].rstrip()
             else:
-                vals = _fields(body0, 23, 3, b0)
+                vals = []
+                _take(body0, _V34_FIRST, b0, memo, vals)
                 extra = ""
         i += 1
         nl = 1
         while i < n:
             nxt = lines[i]
-            if not nxt.strip() or nxt[0:1] == ">":
+            if nxt[0:1] == ">" or not nxt or nxt.isspace():
                 break
-            nxt = nxt.ljust(80)
-            vals.extend(_fields(nxt, 4, 4, i + 1))
+            for a in _V34_CONT:                 # (no ljust: as in _read_v2)
+                raw = nxt[a:a + 19]
+                tok = get(raw)
+                if tok is None:
+                    tok = memo[raw] = check_token(raw.strip(), i + 1, a + 1)
+                vals.append(tok)
             i += 1
             nl += 1
         f.records.append(NavRecord(kind, sat, msg, sub, t, vals, extra, lineno, nl))
@@ -495,8 +565,12 @@ def fmt_token(tok, letter, width=19):
     zero-padded two-digit exponent (rinex211.txt Table A16 note; rinex_4.02.txt §6.8)."""
     if not tok:
         return " " * width
-    m = _EXP.search(tok)
-    if m:
+    m = _STD_EXP.fullmatch(tok)
+    if m is not None:
+        # the usual token, a two-digit exponent with its sign ('-1.234567890123D-04'): the
+        # general steps below give mantissa + letter + exponent
+        t = m[1] + letter + m[2]
+    elif m := _EXP.search(tok):
         mant = tok[:m.start()]
         e = tok[m.end():]
         sign = "-" if e.startswith("-") else "+"
@@ -517,20 +591,46 @@ def _sec_int(sec):
     return int(sec)
 
 
+class _Formatted(dict):
+    """fmt_token(tok, letter) by token, each distinct token formatted once per file (about 22 %
+    of the tokens of BRDC00IGS 3.04 and BRD400DLR 4.02 are distinct). A token that does not fit
+    raises OverflowError at every use, as fmt_token does: only results are kept."""
+
+    def __init__(self, letter):
+        super().__init__()
+        self.letter = letter
+
+    def __missing__(self, tok):
+        txt = fmt_token(tok, self.letter)
+        if type(tok) is str:
+            self[tok] = txt
+        return txt
+
+
 def write_nav(f, version):
-    """Lines of a navigation file in the layout of `version`."""
+    """Lines of a navigation file in the layout of `version`.
+
+    Speed: the spare and undefined positions are looked up once per system (and RINEX 4 record
+    type) and the tokens formatted once per distinct token (_Formatted), in the order fmt_token
+    met them before (all of a record's values in order, those of an STO record from line 1), so
+    the first value that does not fit raises as before."""
     letter = exp_letter(version)
     out = [r.line() for r in f.header]
     out.append(" " * 60 + END)
     major = version[0]
+    fmt = _Formatted(letter).__getitem__     # (map(fmt, v): the fastest form)
+    spares = {}                     # system -> spare_positions (RINEX 2/3)
+    checks = {}                     # (kind, system, msg) -> positions that must be blank (RINEX 4)
     for r in f.records:
         y, mo, d, h, mi, sec = r.time
         v = r.vals
         if r.kind == "EPH" and major != "4":
             # never a value in a spare field (navconv blanks and claims them); a zero spare is
             # carried in RINEX 2/3 (zero and blank both say nothing there)
-            bad = [k for k in spare_positions(version, "EPH", r.sat[0])
-                   if k < len(v) and v[k] and token_value(v[k]) != 0]
+            sp = spares.get(r.sat[0])
+            if sp is None:
+                sp = spares[r.sat[0]] = spare_positions(version, "EPH", r.sat[0])
+            bad = [k for k in sp if k < len(v) and v[k] and token_value(v[k]) != 0]
             if bad:
                 raise AssertionError(f"{r.sat}: value {v[bad[0]]!r} in spare position {bad[0]} of RINEX {version}")
         if major == "2":
@@ -538,32 +638,38 @@ def write_nav(f, version):
                 head = f"{int(r.sat[1:]):2d}"
             else:
                 head = f"{r.sat[0]}{int(r.sat[1:]):02d}"[:3]
-            first = (f"{head} {y % 100:02d} {mo:2d} {d:2d} {h:2d} {mi:2d}{sec:5.1f}"
-                     + "".join(fmt_token(x, letter) for x in v[0:3]))
-            out.append(first.rstrip())
+            first = f"{head} {y % 100:02d} {mo:2d} {d:2d} {h:2d} {mi:2d}{sec:5.1f}"
+            fv = list(map(fmt, v))
+            out.append((first + "".join(fv[0:3])).rstrip())
             for k in range(3, len(v), 4):
-                out.append(("   " + "".join(fmt_token(x, letter) for x in v[k:k + 4])).rstrip())
+                out.append(("   " + "".join(fv[k:k + 4])).rstrip())
             continue
         if major == "4":
             # never a field the target line does not define, nor a value in a spare field
-            # (navconv cuts and claims them)
-            fields = v4_line_fields(version, r.kind, r.sat[0], r.msg)
-            bad = [k for k in v4_spare_positions(version, r.kind, r.sat[0], r.msg) if k < len(v) and v[k]]
-            if fields is not None:
-                bad += [k for k in cut_positions(fields)[0] if k < len(v) and v[k]]
+            # (navconv cuts and claims them): the spare positions, then the undefined ones
+            key = (r.kind, r.sat[0], r.msg)
+            ck = checks.get(key)
+            if ck is None:
+                fields = v4_line_fields(version, r.kind, r.sat[0], r.msg)
+                ck = tuple(v4_spare_positions(version, r.kind, r.sat[0], r.msg))
+                if fields is not None:
+                    ck += tuple(cut_positions(fields)[0])
+                checks[key] = ck
+            bad = [k for k in ck if k < len(v) and v[k]]
             if bad:
                 raise AssertionError(f"{r.kind} {r.sat} {r.msg}: value {v[bad[0]]!r} at position "
                                      f"{bad[0]}, a field RINEX {version} does not define or leaves blank")
             head = f"> {r.kind} {r.sat} {r.msg}" + (f" {r.sub}" if r.sub else "")
             out.append(head.rstrip())
         stamp = f"{y:4d} {mo:02d} {d:02d} {h:02d} {mi:02d} {_sec_int(sec):02d}"
-        if r.kind == "EPH":
-            first = f"{r.sat} {stamp}" + "".join(fmt_token(x, letter) for x in v[0:3])
-        elif r.kind == "STO":
+        if r.kind == "STO":
             first = f"    {stamp}{r.extra}"
+            fv = [None, None, None] + list(map(fmt, v[3:]))
         else:
-            first = f"    {stamp}" + "".join(fmt_token(x, letter) for x in v[0:3])
+            first = f"{r.sat} {stamp}" if r.kind == "EPH" else f"    {stamp}"
+            fv = list(map(fmt, v))
+            first += "".join(fv[0:3])
         out.append(first.rstrip())
         for k in range(3, len(v), 4):
-            out.append(("    " + "".join(fmt_token(x, letter) for x in v[k:k + 4])).rstrip())
+            out.append(("    " + "".join(fv[k:k + 4])).rstrip())
     return out

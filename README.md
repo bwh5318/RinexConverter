@@ -74,6 +74,11 @@ assembled through a temporary file (in the system temp folder; deleted afterward
 largest file tested is a 24 h, 1 Hz, seven-system day (MIZU00JPN, 2026-290): 1.6 GB of
 RINEX 3.05, 150 MB as `.crx.gz`. On an 8 GB laptop (i5-12450H) each conversion took 3.5 to
 8 minutes, with a peak of 2.5 to 3.7 GB (details: docs/DECISIONS.md, "24 h 1 Hz test").
+With `--jobs N`, the largest inputs start first, and another conversion starts only while the
+estimated peaks of those running (2.5 times the decoded size, guessed from the file size: 8 times
+for gz/.Z/bz2/zip, 4 times more for Hatanaka) stay under 70% of the physical memory; one input
+always runs, however large. This is an estimate that makes paging less likely, not a guarantee
+(other programs' memory is not counted). Results are listed in input order, as in a serial run.
 
 ## Tests
 

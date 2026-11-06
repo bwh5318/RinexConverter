@@ -21,6 +21,7 @@ records) go through one canonical form in navcorr.py.
 """
 
 import datetime
+import functools
 from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
 
@@ -429,6 +430,28 @@ REAL_ELSEWHERE = {("S", 14): "IODN", ("J", 22): "L2P-flag"}
 LEGACY_MSG = {"G": "LNAV", "J": "LNAV", "I": "LNAV", "S": "SBAS", "R": "FDMA", "C": "D1", "E": "INAV"}
 
 
+@functools.lru_cache(maxsize=None)
+def _fit_positions(s, src_msg, tgt_msg, sv, tv):
+    """(source spares, source undefined fields, target spares, the positions _fit blanks in
+    ascending order, the 4.02 flags position or None) for an EPH record: pure functions of
+    the system, message types and versions, so computed once per combination (per record they
+    were half of convert_nav's time under cProfile, BRD400DLR 4.02 to 4.02)."""
+    src_sp = frozenset(spare_positions(sv, "EPH", s, src_msg))
+    tgt_sp = frozenset(spare_positions(tv, "EPH", s, tgt_msg))
+    src_undef = frozenset()
+    f = v4_line_fields(sv, "EPH", s, src_msg)
+    if f is not None:
+        src_undef = frozenset(cut_positions(f)[0])
+    gone = src_sp | src_undef | tgt_sp
+    f = v4_line_fields(tv, "EPH", s, tgt_msg)
+    if f is not None:
+        gone |= set(cut_positions(f)[0])
+    if not gone:
+        return src_sp, src_undef, tgt_sp, (), None
+    flags = _flags_position(s, src_msg) if sv >= "4.02" and (s, src_msg) in V402_FLAGS else None
+    return src_sp, src_undef, tgt_sp, tuple(sorted(gone)), flags
+
+
 def _fit(s, src_msg, tgt_msg, vals, sv, tv, report):
     """An EPH record's values as the target's lines hold them: a spare of the source holds no
     defined content, so it is never written into a target field, nor a source value into a
@@ -441,21 +464,11 @@ def _fit(s, src_msg, tgt_msg, vals, sv, tv, report):
     (nav-field-not-representable:<sys>:<msg>:<field>), as the 4.02 CNAV/CNV2 flags. A target
     field the source holds as a spare is left blank, the RINEX 'unknown' (rinex305.txt section
     6.5 p.42: 'can be set to zero or blank')."""
-    src_sp = spare_positions(sv, "EPH", s, src_msg)
-    tgt_sp = spare_positions(tv, "EPH", s, tgt_msg)
-    src_undef = set()
-    f = v4_line_fields(sv, "EPH", s, src_msg)
-    if f is not None:
-        src_undef = set(cut_positions(f)[0])
-    gone = src_sp | src_undef | tgt_sp
-    f = v4_line_fields(tv, "EPH", s, tgt_msg)
-    if f is not None:
-        gone |= set(cut_positions(f)[0])
+    src_sp, src_undef, tgt_sp, gone, flags = _fit_positions(s, src_msg, tgt_msg, sv, tv)
     if not gone:
         return vals
-    flags = _flags_position(s, src_msg) if sv >= "4.02" and (s, src_msg) in V402_FLAGS else None
     out = list(vals)
-    for k in sorted(gone):
+    for k in gone:
         if k >= len(out) or not out[k]:
             continue
         tok = out[k]
